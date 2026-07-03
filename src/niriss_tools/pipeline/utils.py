@@ -274,39 +274,51 @@ def separate_oned_spectra(mb: MultiBeam, tfit: dict | None = None) -> fits.HDULi
 
 
 def gen_linefinding_outputs(
-    grizli_home_dir: os.PathLike, field_name : str = "passage-par682", new_field_name: str = "Par682", zipfile_kwargs : dict = {"compression" : zipfile.ZIP_DEFLATED}
-):
+    grizli_home_dir: os.PathLike,
+    field_name: str = "passage-par682",
+    new_field_name: str = "Par682",
+    out_dir: os.PathLike | None = None,
+    zipfile_kwargs: dict = {"compression": zipfile.ZIP_DEFLATED},
+) -> Path:
+    """
+    Create an archive with the files required for `jwstwfss/linefinding`.
+
+    Parameters
+    ----------
+    grizli_home_dir : os.PathLike
+        Directory containing the usual grizli folders, e.g. ``"Prep"``,
+        ``"visits"``.
+    field_name : str, optional
+        The name of the field, by default ``"passage-par682"``.
+    new_field_name : str, optional
+        The linefinding-compatible field name, by default ``"Par682"``.
+    out_dir : os.PathLike | None, optional
+        The output directory. If ``None`` (default), the archive will be
+        saved to ``grizli_home_dir``.
+    zipfile_kwargs : dict, optional
+        Additional keyword arguments to pass through to `zipfile.ZipFile`,
+        by default ``{"compression": zipfile.ZIP_DEFLATED}``.
+
+    Returns
+    -------
+    Path
+        The path to the zipped archive.
+    """
 
     grizli_home_dir = Path(grizli_home_dir)
 
-    lf_archive = grizli_home_dir / f"linefinding_data.zip"
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+    else:
+        out_dir = grizli_home_dir
+
+    lf_archive = out_dir / f"linefinding_data.zip"
 
     with zipfile.ZipFile(lf_archive, "a", **zipfile_kwargs) as myzip:
         zip_path = zipfile.Path(myzip)
 
-        print(zip_path)
-
-        # for f in passage_dir.glob(f"**/*{fit_ver}_cosmos{cat_ver}*"):
-        #     if f.is_dir():
-        #         for subfiles in f.glob("*"):
-        #             if not (
-        #                 zip_path / subfiles.relative_to(out_base_dir)
-        #             ).exists():
-        #                 myzip.write(
-        #                     subfiles, subfiles.relative_to(out_base_dir)
-        #                 )
-        #     if not (zip_path / f.relative_to(out_base_dir)).exists():
-        #         myzip.write(f, f.relative_to(out_base_dir))
-        # for f in filt_dir.glob("*"):
-        #     if not (zip_path / f.relative_to(out_base_dir)).exists():
-        #         myzip.write(f, f.relative_to(out_base_dir))
-
-        # # myzip.mkdir(zip_path / f"{new_field_name}" / "DATA" / "DIRECT_GRISM")
-        # myzip.mkdir(
-        #     (zip_path / f"{new_field_name}" / "DATA" / "DIRECT_GRISM").relative_to(
-        #         zip_path
-        #     )
-        # )
+        if not (zip_path / "linelist").is_dir():
+            myzip.mkdir("linelist")
 
         new_photcat_path = (
             zip_path
@@ -316,38 +328,60 @@ def gen_linefinding_outputs(
             / f"{new_field_name}_photcat.fits"
         )
         if not (new_photcat_path).is_file():
-            print("no photcat")
-            myzip.write(grizli_home_dir / "Prep" / f"{field_name}_phot.fits", new_photcat_path.relative_to(zip_path))
-            # (Path(DATA_DIR) / f"{new_field_name}" / "DATA/DIRECT_GRISM/Par028_photcat.fits").symlink_to(actual_prep_dir / "passage-par028_phot.fits")
-            # shutil.copy2(
-            #     actual_prep_dir / "passage-par028_phot.fits",
-            #     Path(DATA_DIR)
-            #     / f"{new_field_name}"
-            #     / "DATA/DIRECT_GRISM/Par028_photcat.fits",
-            # )
+            myzip.write(
+                grizli_home_dir / "Prep" / f"{field_name}_phot.fits",
+                new_photcat_path.relative_to(zip_path),
+            )
 
         for f in (grizli_home_dir / "Prep").glob(f"{field_name}-*.fits"):
             new_filepath = (
                 zip_path
                 / f"{new_field_name}"
                 / "DATA"
-                / f"{f.name}".replace(
-                    f"{field_name}-", f"{new_field_name}_"
-                )
+                / f"{f.name}".replace(f"{field_name}-", f"{new_field_name}_")
             )
             if not new_filepath.is_file():
-                print ("not a file", new_filepath)
-                # new_name.symlink_to(f)
-                # shutil.copy2(f, new_name)
                 myzip.write(f, new_filepath.relative_to(zip_path))
-        # .mkdir(
-        #     exist_ok=True, parents=True
-        # )
 
-    # OUTPUT_DIR = "/Users/knedkova/Work/2024PASSAGE/output"
-    # DATA_DIR = "/Users/knedkova/Work/2024PASSAGE/data/"
+        detector_drz_files = list(
+            (grizli_home_dir / "visits").glob(f"*/Prep/*_drz_*.fits")
+        )
+        detector_drz_files.sort()
+        for f in (grizli_home_dir / "visits").glob(f"*/Prep/*_drz_*.fits"):
+            new_filepath = (
+                zip_path
+                / f"{new_field_name}"
+                / "DATA"
+                / f"{new_field_name}_{f.name[f.name.index("-f")+1:]}"
+            )
+            if not new_filepath.is_file():
+                myzip.write(f, new_filepath.relative_to(zip_path))
 
-    # par_number = "028"
+        for oned_dir in ["1D_RC", "1D"]:
+            for f in (grizli_home_dir / "Extractions" / oned_dir).glob("*.fits"):
+                new_filepath = (
+                    zip_path
+                    / f"{new_field_name}"
+                    / "spec1D"
+                    / f"{f.name}".replace(f"{field_name}_", f"{new_field_name}_")
+                    .replace("1D_RC", "1D")
+                    .replace("1D", "spec1D")
+                )
 
-    return
+                if not new_filepath.is_file():
+                    myzip.write(f, new_filepath.relative_to(zip_path))
 
+        for f in (grizli_home_dir / "Extractions" / "stack").glob("*.fits"):
+            new_filepath = (
+                zip_path
+                / f"{new_field_name}"
+                / "spec2D"
+                / f"{f.name}".replace(f"{field_name}_", f"{new_field_name}_").replace(
+                    "stack", "spec2D"
+                )
+            )
+
+            if not new_filepath.is_file():
+                myzip.write(f, new_filepath.relative_to(zip_path))
+
+    return lf_archive
