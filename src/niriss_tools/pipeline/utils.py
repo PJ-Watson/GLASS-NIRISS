@@ -10,6 +10,7 @@ from astropy.table import Table
 from grizli import utils as grizli_utils
 from grizli.multifit import MultiBeam
 from numpy.typing import ArrayLike
+from tqdm import tqdm
 
 __all__ = [
     "parse_images_from_pattern",
@@ -334,7 +335,10 @@ def gen_linefinding_outputs(
                 new_photcat_path.relative_to(zip_path),
             )
 
-        for f in (grizli_home_dir / "Prep").glob(f"{field_name}-*.fits"):
+        for f in tqdm(
+            list((grizli_home_dir / "Prep").glob(f"{field_name}-*.fits")),
+            desc="Compressing aligned images",
+        ):
             new_filepath = (
                 zip_path
                 / f"{new_field_name}"
@@ -348,18 +352,26 @@ def gen_linefinding_outputs(
             (grizli_home_dir / "visits").glob(f"*/Prep/*_drz_*.fits")
         )
         detector_drz_files.sort()
-        for f in (grizli_home_dir / "visits").glob(f"*/Prep/*_drz_*.fits"):
+        for f in tqdm(
+            list((grizli_home_dir / "visits").glob(f"*/Prep/*_drz_*.fits")),
+            desc="Compressing detector images",
+        ):
             new_filepath = (
                 zip_path
                 / f"{new_field_name}"
                 / "DATA"
-                / f"{new_field_name}_{f.name[f.name.index("-f")+1:]}"
+                / f"{new_field_name}_{f.name[f.name.index("-f")+1:]}".replace(
+                    "-clear", ""
+                )
             )
             if not new_filepath.is_file():
                 myzip.write(f, new_filepath.relative_to(zip_path))
 
         for oned_dir in ["1D_RC", "1D"]:
-            for f in (grizli_home_dir / "Extractions" / oned_dir).glob("*.fits"):
+            for f in tqdm(
+                list((grizli_home_dir / "Extractions" / oned_dir).glob("*.fits")),
+                desc=f"Compressing {oned_dir} spectra",
+            ):
                 new_filepath = (
                     zip_path
                     / f"{new_field_name}"
@@ -372,7 +384,10 @@ def gen_linefinding_outputs(
                 if not new_filepath.is_file():
                     myzip.write(f, new_filepath.relative_to(zip_path))
 
-        for f in (grizli_home_dir / "Extractions" / "stack").glob("*.fits"):
+        for f in tqdm(
+            list((grizli_home_dir / "Extractions" / "stack").glob("*.fits")),
+            desc="Compressing 2D spectra",
+        ):
             new_filepath = (
                 zip_path
                 / f"{new_field_name}"
