@@ -18,6 +18,7 @@ __all__ = [
     "getExpIdFromQuery",
     "queryMAST",
     "separate_oned_spectra",
+    "gen_linefinding_outputs",
 ]
 
 
