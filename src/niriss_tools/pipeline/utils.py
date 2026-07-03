@@ -1,6 +1,8 @@
 """Pipeline utility functions."""
 
 import os
+import zipfile
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -269,3 +271,83 @@ def separate_oned_spectra(mb: MultiBeam, tfit: dict | None = None) -> fits.HDULi
                 continue
 
     return new_hdul
+
+
+def gen_linefinding_outputs(
+    grizli_home_dir: os.PathLike, field_name : str = "passage-par682", new_field_name: str = "Par682", zipfile_kwargs : dict = {"compression" : zipfile.ZIP_DEFLATED}
+):
+
+    grizli_home_dir = Path(grizli_home_dir)
+
+    lf_archive = grizli_home_dir / f"linefinding_data.zip"
+
+    with zipfile.ZipFile(lf_archive, "a", **zipfile_kwargs) as myzip:
+        zip_path = zipfile.Path(myzip)
+
+        print(zip_path)
+
+        # for f in passage_dir.glob(f"**/*{fit_ver}_cosmos{cat_ver}*"):
+        #     if f.is_dir():
+        #         for subfiles in f.glob("*"):
+        #             if not (
+        #                 zip_path / subfiles.relative_to(out_base_dir)
+        #             ).exists():
+        #                 myzip.write(
+        #                     subfiles, subfiles.relative_to(out_base_dir)
+        #                 )
+        #     if not (zip_path / f.relative_to(out_base_dir)).exists():
+        #         myzip.write(f, f.relative_to(out_base_dir))
+        # for f in filt_dir.glob("*"):
+        #     if not (zip_path / f.relative_to(out_base_dir)).exists():
+        #         myzip.write(f, f.relative_to(out_base_dir))
+
+        # # myzip.mkdir(zip_path / f"{new_field_name}" / "DATA" / "DIRECT_GRISM")
+        # myzip.mkdir(
+        #     (zip_path / f"{new_field_name}" / "DATA" / "DIRECT_GRISM").relative_to(
+        #         zip_path
+        #     )
+        # )
+
+        new_photcat_path = (
+            zip_path
+            / new_field_name
+            / "DATA"
+            / "DIRECT_GRISM"
+            / f"{new_field_name}_photcat.fits"
+        )
+        if not (new_photcat_path).is_file():
+            print("no photcat")
+            myzip.write(grizli_home_dir / "Prep" / f"{field_name}_phot.fits", new_photcat_path.relative_to(zip_path))
+            # (Path(DATA_DIR) / f"{new_field_name}" / "DATA/DIRECT_GRISM/Par028_photcat.fits").symlink_to(actual_prep_dir / "passage-par028_phot.fits")
+            # shutil.copy2(
+            #     actual_prep_dir / "passage-par028_phot.fits",
+            #     Path(DATA_DIR)
+            #     / f"{new_field_name}"
+            #     / "DATA/DIRECT_GRISM/Par028_photcat.fits",
+            # )
+
+        for f in (grizli_home_dir / "Prep").glob(f"{field_name}-*.fits"):
+            new_filepath = (
+                zip_path
+                / f"{new_field_name}"
+                / "DATA"
+                / f"{f.name}".replace(
+                    f"{field_name}-", f"{new_field_name}_"
+                )
+            )
+            if not new_filepath.is_file():
+                print ("not a file", new_filepath)
+                # new_name.symlink_to(f)
+                # shutil.copy2(f, new_name)
+                myzip.write(f, new_filepath.relative_to(zip_path))
+        # .mkdir(
+        #     exist_ok=True, parents=True
+        # )
+
+    # OUTPUT_DIR = "/Users/knedkova/Work/2024PASSAGE/output"
+    # DATA_DIR = "/Users/knedkova/Work/2024PASSAGE/data/"
+
+    # par_number = "028"
+
+    return
+
