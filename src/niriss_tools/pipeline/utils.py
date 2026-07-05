@@ -401,3 +401,165 @@ def gen_linefinding_outputs(
                 myzip.write(f, new_filepath.relative_to(zip_path))
 
     return lf_archive
+
+
+def gen_pygcg_outputs(
+    grizli_home_dir: os.PathLike,
+    field_name: str = "passage-par682",
+    out_dir: os.PathLike | None = None,
+    zipfile_kwargs: dict = {"compression": zipfile.ZIP_DEFLATED},
+) -> Path:
+    """
+    Create an archive with the files required for `PJ-Watson/pyGCG`.
+
+    Parameters
+    ----------
+    grizli_home_dir : os.PathLike
+        Directory containing the usual grizli folders, e.g. ``"Prep"``,
+        ``"visits"``.
+    field_name : str, optional
+        The name of the field, by default ``"passage-par682"``.
+    out_dir : os.PathLike | None, optional
+        The output directory. If ``None`` (default), the archive will be
+        saved to ``grizli_home_dir``.
+    zipfile_kwargs : dict, optional
+        Additional keyword arguments to pass through to `zipfile.ZipFile`,
+        by default ``{"compression": zipfile.ZIP_DEFLATED}``.
+
+    Returns
+    -------
+    Path
+        The path to the zipped archive.
+    """
+
+    import tomlkit
+
+    grizli_home_dir = Path(grizli_home_dir)
+
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+    else:
+        out_dir = grizli_home_dir
+
+    pygcg_archive = out_dir / f"pygcg_data.zip"
+
+    with zipfile.ZipFile(pygcg_archive, "a", **zipfile_kwargs) as myzip:
+        zip_path = zipfile.Path(myzip)
+
+        new_cat_path = (
+            zip_path / field_name / "Extractions" / f"{field_name}-ir.cat.fits"
+        )
+        if not (new_cat_path).is_file():
+            myzip.write(
+                grizli_home_dir / "Prep" / new_cat_path.name,
+                new_cat_path.relative_to(zip_path),
+            )
+
+        for f in tqdm(
+            list((grizli_home_dir / "Prep").glob(f"{field_name}-*.fits")),
+            desc="Compressing aligned images",
+        ):
+            new_filepath = zip_path / field_name / "Prep" / f.name
+            if not new_filepath.is_file():
+                myzip.write(f, new_filepath.relative_to(zip_path))
+
+        for oned_dir in ["1D_RC", "1D"]:
+            for f in tqdm(
+                list((grizli_home_dir / "Extractions" / oned_dir).glob("*.fits")),
+                desc=f"Compressing {oned_dir} spectra",
+            ):
+                new_filepath = zip_path / field_name / "Extractions" / oned_dir / f.name
+
+                if not new_filepath.is_file():
+                    myzip.write(f, new_filepath.relative_to(zip_path))
+
+        for f in tqdm(
+            list((grizli_home_dir / "Extractions" / "stack").glob("*.fits")),
+            desc="Compressing 2D spectra",
+        ):
+            new_filepath = zip_path / field_name / "Extractions" / "stack" / f.name
+
+            if not new_filepath.is_file():
+                myzip.write(f, new_filepath.relative_to(zip_path))
+
+        zinfo_dir = grizli_home_dir / "Extractions" / "zinfo"
+        zinfo_dir.mkdir(exist_ok=True, parents=True)
+
+        for f in tqdm(
+            list((grizli_home_dir / "Extractions" / "full").glob("*.fits")),
+            desc="Creating zinfo files",
+        ):
+            zinfo_filepath = zinfo_dir / f.name.replace("full", "zinfo")
+
+            if not new_filepath.is_file():
+
+                with fits.open(f) as full_hdul:
+                    zinfo_hdul = full_hdul[:4]
+                    zinfo_hdul.write(new_filepath)
+
+            new_filepath = (
+                zip_path / field_name / "Extractions" / "zinfo" / zinfo_filepath.name
+            )
+
+            if not new_filepath.is_file():
+                myzip.write(f, new_filepath.relative_to(zip_path))
+
+        doc = tomlkit.document()
+
+        import datetime
+
+        curr_time = (
+            datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+        )
+
+        doc.add(tomlkit.comment(f"{field_name} config generated on {curr_time}"))
+        doc.add(tomlkit.nl())
+        doc.add("title", f"pyGCG config: {field_name}")
+
+        files = tomlkit.table()
+        files.add("root_dir", "")
+        files.add("out_dir", f"{field_name}/pyGCG_outputs")
+        files.add("extractions_dir", f"{field_name}/Extractions")
+        files.add("cat_path", f"{field_name}/Extractions/{field_name}-ir.cat.fits")
+        files.add("prep_dir", f"{field_name}/Prep")
+        files.add("prep_dir", f"pyGCG_class_{field_name}.fits")
+
+        # Adding the table to the document
+        doc.add("files", files)
+
+        grisms = tomlkit.table()
+        grisms.add("root_dir", "")
+
+        all_PAs = []
+        for f in tqdm(
+            list((grizli_home_dir / "Extractions" / "zinfo").glob("*.fits")),
+            desc="Checking zinfo files",
+        ):
+            hdr = fits.getheader(f)
+            total_n = (
+                hdr.get("N_F115W", 0) + hdr.get("N_F150W", 0) + hdr.get("N_F200W", 0)
+            )
+            all_PAs.extend(
+                np.unique(
+                    np.array([hdr.get(f"PA{i+1:0>4}") for i in np.arange(total_n)])
+                )
+            )
+
+        all_PAs = np.unique(all_PAs)
+        for i, p in enumerate(all_PAs):
+            grisms.add(f"PA{i}", p)
+
+        doc.add("grisms", grisms)
+
+        with open(grizli_home_dir / f"pyGCG_config_{field_name}.toml", "w") as fp:
+            tomlkit.dump(data, fp)
+
+        new_filepath = zip_path / f"pyGCG_config_{field_name}.toml"
+
+        if not (new_filepath).is_file():
+            myzip.write(
+                grizli_home_dir / f"pyGCG_config_{field_name}.toml",
+                f"pyGCG_config_{field_name}.toml",
+            )
+
+    return pygcg_archive

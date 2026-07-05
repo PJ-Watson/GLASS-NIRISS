@@ -36,7 +36,8 @@ dependencies = [
     "bagpipes>=1.3.2",
     "grizli[jwst,aws]@git+https://github.com/PJ-Watson/grizli@new_workflow",
     "bottleneck",
-    "pypher>=0.7.3"
+    "pypher>=0.7.3",
+    "tomlkit"
 ]
 
 [project.optional-dependencies]
