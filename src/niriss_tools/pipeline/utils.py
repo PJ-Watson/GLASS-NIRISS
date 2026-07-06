@@ -20,6 +20,7 @@ __all__ = [
     "queryMAST",
     "separate_oned_spectra",
     "gen_linefinding_outputs",
+    "gen_pygcg_outputs",
 ]
 
 
