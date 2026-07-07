@@ -492,11 +492,11 @@ def gen_pygcg_outputs(
         ):
             zinfo_filepath = zinfo_dir / f.name.replace("full", "zinfo")
 
-            if not new_filepath.is_file():
+            if not zinfo_filepath.is_file():
 
                 with fits.open(f) as full_hdul:
-                    zinfo_hdul = full_hdul[:4]
-                    zinfo_hdul.write(new_filepath)
+                    zinfo_hdul = full_hdul[:2]
+                    zinfo_hdul.write(zinfo_filepath)
 
             new_filepath = (
                 zip_path / field_name / "Extractions" / "zinfo" / zinfo_filepath.name
@@ -523,7 +523,7 @@ def gen_pygcg_outputs(
         files.add("extractions_dir", f"{field_name}/Extractions")
         files.add("cat_path", f"{field_name}/Extractions/{field_name}-ir.cat.fits")
         files.add("prep_dir", f"{field_name}/Prep")
-        files.add("prep_dir", f"pyGCG_class_{field_name}.fits")
+        files.add("out_cat_name", f"pyGCG_class_{field_name}.fits")
 
         # Adding the table to the document
         doc.add("files", files)
