@@ -464,7 +464,7 @@ def gen_pygcg_outputs(
             if not new_filepath.is_file():
                 myzip.write(f, new_filepath.relative_to(zip_path))
 
-        for oned_dir in ["1D_RC", "1D"]:
+        for oned_dir in ["1D"]:
             for f in tqdm(
                 list((grizli_home_dir / "Extractions" / oned_dir).glob("*.fits")),
                 desc=f"Compressing {oned_dir} spectra",
@@ -496,14 +496,17 @@ def gen_pygcg_outputs(
 
                 with fits.open(f) as full_hdul:
                     zinfo_hdul = full_hdul[:2]
-                    zinfo_hdul.write(zinfo_filepath)
+                    zinfo_hdul[1].data = fits.BinTableHDU(
+                        Table(zinfo_hdul[1].data)["zgrid", "chi2"]
+                    ).data
+                    zinfo_hdul.writeto(zinfo_filepath)
 
             new_filepath = (
                 zip_path / field_name / "Extractions" / "zinfo" / zinfo_filepath.name
             )
 
             if not new_filepath.is_file():
-                myzip.write(f, new_filepath.relative_to(zip_path))
+                myzip.write(zinfo_filepath, new_filepath.relative_to(zip_path))
 
         doc = tomlkit.document()
 
