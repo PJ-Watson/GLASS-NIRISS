@@ -5,7 +5,7 @@ Functions and classes for generating specific types of model spectra.
 import warnings
 from copy import deepcopy
 from functools import partial
-from multiprocessing import Pool
+from multiprocessing import Manager, Pool
 from pathlib import Path
 
 import bagpipes
@@ -559,14 +559,26 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
         """
 
         t_bc = 0.01
+        fesc = 0.0
+
         if "t_bc" in list(model_comp):
             t_bc = model_comp["t_bc"]
 
         spectrum_bc, spectrum = self.stellar.spectrum(self.sfh.ceh.grid, t_bc)
         em_lines = np.zeros(config.line_wavs.shape)
 
+        # keep a copy of original BC spectrum for later (i.e., fesc=100%)
+        spectrum_bc_f100 = np.copy(spectrum_bc)
+
         if self.nebular and not cont_only:
             grid = np.copy(self.sfh.ceh.grid)
+
+            # adding picket fence fesc
+            if "fesc" in list(model_comp["nebular"]):
+                fesc = model_comp["nebular"]["fesc"]
+
+                if not (0.0 <= fesc <= 1.0):
+                    raise ValueError("fesc must be between 0 and 1.")
 
             if "metallicity" in list(model_comp["nebular"]):
                 nebular_metallicity = model_comp["nebular"]["metallicity"]
@@ -582,15 +594,10 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
                 grid, t_bc, model_comp["nebular"]["logU"]
             )
 
-            # Stellar light below 912A is converted to nebular emission
-            if "fesc" in list(model_comp["nebular"]):
-                f_esc = model_comp["nebular"]["fesc"]
-            else:
-                f_esc = 0.0
-
-            spectrum_bc[self.wavelengths < 912.0] *= f_esc
-            logU = model_comp["nebular"]["logU"]
-            spectrum_bc += (1 - f_esc) * self.nebular.spectrum(grid, t_bc, logU)
+            spectrum_bc[self.wavelengths < 912.0] *= fesc
+            spectrum_bc += self.nebular.spectrum(
+                grid, t_bc, model_comp["nebular"]["logU"]
+            )
 
             if rm_line is not None:
                 rm_line = np.atleast_1d(rm_line).ravel()
@@ -616,17 +623,17 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             if "eta" in list(model_comp["dust"]):
                 eta = model_comp["dust"]["eta"]
                 bc_Av_reduced = (eta - 1.0) * model_comp["dust"]["Av"]
-                bc_trans_red = 10 ** (-bc_Av_reduced * self.dust_atten.A_cont / 2.5)
                 if self.dust_atten.type == "VW07":
                     bc_trans_red = 10 ** (
                         -bc_Av_reduced * self.dust_atten.A_cont_bc / 2.5
                     )
                 else:
                     bc_trans_red = 10 ** (-bc_Av_reduced * self.dust_atten.A_cont / 2.5)
+
                 spectrum_bc_dust = spectrum_bc * bc_trans_red
-                dust_flux += np.trapz(
+                dust_flux += np.trapezoid(
                     spectrum_bc - spectrum_bc_dust, x=self.wavelengths
-                )
+                ) * (1.0 - fesc)
 
                 spectrum_bc = spectrum_bc_dust
 
@@ -642,16 +649,27 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
                 bc_Av = eta * model_comp["dust"]["Av"]
                 em_lines *= 10 ** (-bc_Av * self.dust_atten.A_line / 2.5)
 
-        spectrum += spectrum_bc  # Add birth cloud spectrum to spectrum.
+        # Track fesc on line fluxes before (potentially) adding diff dust
+        em_lines = em_lines * (1.0 - fesc)
 
         # Add attenuation due to the diffuse ISM.
         if self.dust_atten:
             trans = 10 ** (-model_comp["dust"]["Av"] * self.dust_atten.A_cont / 2.5)
             dust_spectrum = spectrum * trans
-            dust_flux += np.trapz(spectrum - dust_spectrum, x=self.wavelengths)
+            dust_spectrum_bc = spectrum_bc * trans
+            dust_flux += np.trapezoid(spectrum - dust_spectrum, x=self.wavelengths)
+            dust_flux += np.trapezoid(
+                spectrum_bc - dust_spectrum_bc, x=self.wavelengths
+            ) * (1.0 - fesc)
 
-            spectrum = dust_spectrum
-            self.spectrum_bc = spectrum_bc * trans
+            spectrum = (
+                dust_spectrum
+                + dust_spectrum_bc * (1.0 - fesc)
+                + spectrum_bc_f100 * fesc
+            )
+            self.spectrum_bc = (spectrum_bc * trans) * (
+                1.0 - fesc
+            ) + spectrum_bc_f100 * fesc
 
             # Add dust emission.
             qpah, umin, gamma = 2.0, 1.0, 0.01
@@ -666,7 +684,14 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
 
             spectrum += dust_flux * self.dust_emission.spectrum(qpah, umin, gamma)
 
+        # if no diffuse dust is added, just add birth cloud spectrum to spectrum.
+        else:
+            spectrum += spectrum_bc * (1.0 - fesc) + spectrum_bc_f100 * fesc
+
         spectrum *= self.igm.trans(model_comp["redshift"])
+
+        if self.dust_atten:
+            self.spectrum_bc *= self.igm.trans(model_comp["redshift"])
 
         if "dla" in list(model_comp):
             if "redshift" in list(model_comp["dla"]):
@@ -750,7 +775,7 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             x_kernel_pix = np.arange(-k_size, k_size + 1)
 
             kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
-            kernel /= np.trapz(kernel)  # Explicitly normalise kernel
+            kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
 
             spectrum = np.convolve(self.spectrum_full, kernel, mode="valid")
             redshifted_wavs = zplusone * self.wavelengths[k_size:-k_size]
@@ -772,7 +797,7 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             x_kernel_pix = np.arange(-k_size, k_size + 1)
 
             kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
-            kernel /= np.trapz(kernel)  # Explicitly normalise kernel
+            kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
 
             # Disperse non-uniformly sampled spectrum
             spectrum = np.convolve(spectrum, kernel, mode="valid")
