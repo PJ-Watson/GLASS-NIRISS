@@ -10,7 +10,6 @@ import traceback
 from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
-from itertools import product
 from multiprocessing import Lock, Manager, Pool, cpu_count, shared_memory
 from multiprocessing.managers import SharedMemoryManager
 from os import PathLike
@@ -18,7 +17,6 @@ from pathlib import Path
 from time import time
 
 import h5py
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.optimize
 from astropy.io import fits
@@ -28,7 +26,6 @@ from astropy.wcs import WCS
 from bagpipes_extended import AtlasFitter, AtlasGenerator
 from bagpipes_extended.pipeline import generate_fit_params, load_photom_bagpipes
 from grizli import utils as grizli_utils
-from grizli.model import GrismDisperser
 from grizli.multifit import MultiBeam, drizzle_to_wavelength
 from numpy.typing import ArrayLike
 from reproject import reproject_interp
@@ -38,7 +35,6 @@ from niriss_tools.grism.fitting_tools import CDNNLS, fennls, fnnls
 from niriss_tools.grism.specgen import (
     CLOUDY_LINE_MAP,
     BagpipesSampler,
-    ExtendedModelGalaxy,
     check_coverage,
     pre_gen_spec,
 )
@@ -50,6 +46,13 @@ from niriss_tools.grism.utils import (
 )
 from niriss_tools.pipeline.reduction import recursive_merge
 from niriss_tools.sed.binning import bin_and_save
+
+"""
+TODO: remove logic from _gen functions. Instead create template IDs as
+`{seg_id}-{model_id}`.
+Simplify model generation and combine output table columns into "tempID".
+"""
+
 
 __all__ = ["MultiRegionFit", "DEFAULT_PLINE"]
 
@@ -1592,10 +1595,8 @@ class MultiRegionFit:
                 out_coeffs = np.zeros(stacked_A.shape[0])
 
                 # Transpose the template array
-                # stacked_Ax = stacked_A[:, stacked_fit_mask][ok_temp, :].T
                 stacked_Ax = stacked_A[np.ix_(ok_temp, stacked_fit_mask)].T
 
-                # stacked_Ax *= np.sqrt(stacked_ivarf[stacked_fit_mask][:, np.newaxis])
                 stacked_Ax *= stacked_sivarf_masked[:, np.newaxis]
 
                 # Change the max iters and tolerance for the final iteration
@@ -1660,7 +1661,6 @@ class MultiRegionFit:
                     coeffs[:num_stacks] -= pedestal
 
                 t2 = time()
-                # print("\r" + f"NNLS fitting... DONE {t2-t1:.3f}s", flush=True)
                 log_with_offset(
                     LINE_UP + f"NNLS fitting...         DONE in {t2-t1:.3f}s",
                     curr_line=curr_line,
@@ -1675,23 +1675,6 @@ class MultiRegionFit:
                         * stacked_ivarf
                     )[stacked_fit_mask]
                 )
-                # output_table.add_row(
-                #     [
-                #         iteration,
-                #         chi2,
-                #         _nnls_i,
-                #         state_iters if (nnls_method == "adelie" and HAS_ADELIE) else 0,
-                #         _nnls_t,
-                #         rows,
-                #         id_shifts,
-                #         n_shifted_samples,
-                #         t2 - t1,
-                #         time() - t0,
-                #         ok_temp.sum(),
-                #         *out_coeffs[:temp_offset],
-                #         *out_coeffs[temp_offset:].reshape(self.n_regions, -1),
-                #     ]
-                # )
                 output_table[iteration] = [
                     iteration,
                     chi2,
@@ -1709,7 +1692,6 @@ class MultiRegionFit:
                 ]
 
                 output_table.write(self.output_table_path, overwrite=True)
-                # print(f"Iteration {iteration}: chi2={chi2:.3f}\n")
                 log_with_offset(
                     f"Iteration {iteration}: chi2={chi2:.3f}", curr_line=curr_line
                 )

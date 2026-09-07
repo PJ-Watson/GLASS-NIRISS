@@ -556,7 +556,7 @@ def gen_pygcg_outputs(
         doc.add("grisms", grisms)
 
         with open(grizli_home_dir / f"pyGCG_config_{field_name}.toml", "w") as fp:
-            tomlkit.dump(data, fp)
+            tomlkit.dump(doc, fp)
 
         new_filepath = zip_path / f"pyGCG_config_{field_name}.toml"
 
