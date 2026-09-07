@@ -53,6 +53,8 @@ TODO: remove logic from _gen functions. Instead create template IDs as
 Simplify model generation and combine output table columns into "tempID".
 """
 
+# Allow for environment variable override if necessary
+float_dtype = os.getenv("MULTIREGION_FLOAT_DTYPE", np.float32)
 
 __all__ = ["MultiRegionFit", "DEFAULT_PLINE"]
 
@@ -658,19 +660,19 @@ class MultiRegionFit:
 
             if memmap:
                 seg_maps = np.memmap(
-                    shared_seg_name, dtype=np.float32, shape=seg_maps_shape, mode="r+"
+                    shared_seg_name, dtype=float_dtype, shape=seg_maps_shape, mode="r+"
                 )
                 temps_arr = np.memmap(
-                    shared_models_name, dtype=np.float32, shape=models_shape, mode="r+"
+                    shared_models_name, dtype=float_dtype, shape=models_shape, mode="r+"
                 )
             else:
                 shm_seg_maps = shared_memory.SharedMemory(name=shared_seg_name)
                 seg_maps = np.ndarray(
-                    seg_maps_shape, dtype=np.float32, buffer=shm_seg_maps.buf
+                    seg_maps_shape, dtype=float_dtype, buffer=shm_seg_maps.buf
                 )
                 shm_temps = shared_memory.SharedMemory(name=shared_models_name)
                 temps_arr = np.ndarray(
-                    models_shape, dtype=np.float32, buffer=shm_temps.buf
+                    models_shape, dtype=float_dtype, buffer=shm_temps.buf
                 )
 
             if spectral_dir is not None:
@@ -798,19 +800,19 @@ class MultiRegionFit:
 
             if memmap:
                 seg_maps = np.memmap(
-                    shared_seg_name, dtype=np.float32, shape=seg_maps_shape, mode="r+"
+                    shared_seg_name, dtype=float_dtype, shape=seg_maps_shape, mode="r+"
                 )
                 models_arr = np.memmap(
-                    shared_models_name, dtype=np.float32, shape=models_shape, mode="r+"
+                    shared_models_name, dtype=float_dtype, shape=models_shape, mode="r+"
                 )
             else:
                 shm_seg_maps = shared_memory.SharedMemory(name=shared_seg_name)
                 seg_maps = np.ndarray(
-                    seg_maps_shape, dtype=np.float32, buffer=shm_seg_maps.buf
+                    seg_maps_shape, dtype=float_dtype, buffer=shm_seg_maps.buf
                 )
                 shm_models = shared_memory.SharedMemory(name=shared_models_name)
                 models_arr = np.ndarray(
-                    models_shape, dtype=np.float32, buffer=shm_models.buf
+                    models_shape, dtype=float_dtype, buffer=shm_models.buf
                 )
 
             with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
@@ -903,17 +905,17 @@ class MultiRegionFit:
     ):
         if memmap:
             init_arr = np.memmap(
-                shared_input, dtype=np.float32, shape=init_shape, mode="r+"
+                shared_input, dtype=float_dtype, shape=init_shape, mode="r+"
             )
             output_arr = np.memmap(
-                shared_output, dtype=np.float32, shape=output_shape, mode="r+"
+                shared_output, dtype=float_dtype, shape=output_shape, mode="r+"
             )
         else:
             shm_init = shared_memory.SharedMemory(name=shared_input)
-            init_arr = np.ndarray(init_shape, dtype=np.float32, buffer=shm_init.buf)
+            init_arr = np.ndarray(init_shape, dtype=float_dtype, buffer=shm_init.buf)
             shm_output = shared_memory.SharedMemory(name=shared_output)
             output_arr = np.ndarray(
-                output_shape, dtype=np.float32, buffer=shm_output.buf
+                output_shape, dtype=float_dtype, buffer=shm_output.buf
             )
 
         output_arr[seg_idx, beam_idx, :, :] = block_reduce(
@@ -1171,17 +1173,17 @@ class MultiRegionFit:
         if memmap:
             oversamp_seg_maps = np.memmap(
                 temp_dir / "memmap_oversamp_seg_maps.dat",
-                dtype=np.float32,
+                dtype=float_dtype,
                 mode="w+",
                 shape=oversamp_seg_maps_shape,
             )
         else:
             shm_seg_maps = smm.SharedMemory(
-                size=np.dtype(np.float32).itemsize * np.prod(oversamp_seg_maps_shape)
+                size=np.dtype(float_dtype).itemsize * np.prod(oversamp_seg_maps_shape)
             )
             oversamp_seg_maps = np.ndarray(
                 oversamp_seg_maps_shape,
-                dtype=np.float32,
+                dtype=float_dtype,
                 buffer=shm_seg_maps.buf,
             )
 
@@ -1198,17 +1200,17 @@ class MultiRegionFit:
         if memmap:
             oversampled = np.memmap(
                 temp_dir / "memmap_oversampled.dat",
-                dtype=np.float32,
+                dtype=float_dtype,
                 mode="w+",
                 shape=oversampled_shape,
             )
         else:
             shm_oversampled = smm.SharedMemory(
-                size=np.dtype(np.float32).itemsize * np.prod(oversampled_shape)
+                size=np.dtype(float_dtype).itemsize * np.prod(oversampled_shape)
             )
             oversampled = np.ndarray(
                 oversampled_shape,
-                dtype=np.float32,
+                dtype=float_dtype,
                 buffer=shm_oversampled.buf,
             )
         oversampled.fill(np.nan)
@@ -1286,17 +1288,17 @@ class MultiRegionFit:
         if memmap:
             stacked_A = np.memmap(
                 temp_dir / "memmap_stacked_A.dat",
-                dtype=np.float32,
+                dtype=float_dtype,
                 mode="w+",
                 shape=stacked_A_shape,
             )
         else:
             shm_stacked_A = smm.SharedMemory(
-                size=np.dtype(np.float32).itemsize * np.prod(stacked_A_shape)
+                size=np.dtype(float_dtype).itemsize * np.prod(stacked_A_shape)
             )
             stacked_A = np.ndarray(
                 stacked_A_shape,
-                dtype=np.float32,
+                dtype=float_dtype,
                 buffer=shm_stacked_A.buf,
             )
 
@@ -1359,7 +1361,7 @@ class MultiRegionFit:
         y = stacked_scif[stacked_fit_mask] + pedestal
         y *= np.sqrt(stacked_ivarf[stacked_fit_mask])
 
-        y = y.astype(np.float32)
+        y = y.astype(float_dtype)
 
         stacked_sivarf_masked = np.sqrt(stacked_ivarf[stacked_fit_mask])
 
@@ -1617,8 +1619,8 @@ class MultiRegionFit:
                     state = adelie.solver.bvls(
                         stacked_Ax,
                         y,
-                        lower=np.zeros(stacked_Ax.shape[-1], dtype=np.float32),
-                        upper=np.full(stacked_Ax.shape[-1], np.inf, dtype=np.float32),
+                        lower=np.zeros(stacked_Ax.shape[-1], dtype=float_dtype),
+                        upper=np.full(stacked_Ax.shape[-1], np.inf, dtype=float_dtype),
                         max_iters=_nnls_i,
                         tol=_nnls_t,
                         n_threads=1,  # Inter-thread communication is actually slower
@@ -1893,18 +1895,18 @@ class MultiRegionFit:
             if memmap:
                 flat_beam_models = np.memmap(
                     temp_dir / "memmap_beams_model.dat",
-                    dtype=np.float32,
+                    dtype=float_dtype,
                     mode="w+",
                     shape=(beam_models_len),
                 )
             else:
 
                 shm_beam_models = smm.SharedMemory(
-                    size=np.dtype(np.float32).itemsize * beam_models_len
+                    size=np.dtype(float_dtype).itemsize * beam_models_len
                 )
                 flat_beam_models = np.ndarray(
                     (beam_models_len),
-                    dtype=np.float32,
+                    dtype=float_dtype,
                     buffer=shm_beam_models.buf,
                 )
 
