@@ -5,6 +5,13 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import ast
+
+from bagpipes import config
+from niriss_tools.grism.specgen import BagpipesSpecGenerator, air_to_vac
+from functools import partial
+from itertools import repeat
+from grizli.utils_numba.interp import interp_conserve_c
 
 
 class TemplateSampler:
@@ -51,6 +58,14 @@ class TemplateSampler:
         raise NotImplementedError("Subclasses should implement this method.")
 
 
+def init_bagpipes_spec_gen(fit_instructions, veldisp, spec_wavs):
+
+    global spec_generator
+    spec_generator = BagpipesSpecGenerator(
+        fit_instructions=fit_instructions, veldisp=veldisp, spec_wavs=spec_wavs
+    )
+
+
 class BagpipesTemplateSampler(TemplateSampler):
     """
     A subclass of TemplateSampler to be used with SED fits from `bagpipes`.
@@ -71,6 +86,9 @@ class BagpipesTemplateSampler(TemplateSampler):
         posterior_dir: Path,
         seed: int = 2744,
         cpu_count: int = multiprocessing.cpu_count(),
+        cache_spectra: bool = True,
+        spec_wavs: np.ndarray = np.arange(10000.0, 23000.0, 22.5),
+        veldisp: float = 250,
     ):
 
         super().__init__(seed)
@@ -85,21 +103,14 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         self.cpu_count = cpu_count
 
+        self.cache_spectra = True
+
         self.fit_instructions = self.load_fit_instructions(
             posterior_dir / f"{self.posterior_ids[0]}.h5"
         )
 
-        # # Testing
-        # params_array = np.array([
-        #     "a", "b", "a", "a", "c", "b"
-        # ])
-
-        # u, inv = np.unique(params_array, return_inverse=True)
-        # print (u)
-        # print (inv)
-        # new = inv.reshape(3, -1)
-        # # new = inv[2, :]
-        # print (new[0])
+        self.veldisp = veldisp
+        self.spec_wavs = spec_wavs
 
         with multiprocessing.Pool(self.cpu_count) as pool:
 
@@ -114,7 +125,255 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         self.all_models_params = u
 
+        # print (ast.literal_eval(self.all_models_params[0]))
+
+        # exit()
+
         self.posterior_params_map = inv.reshape(len(params_lists), -1)
+
+        # exit()
+
+        if self.cache_spectra:
+            # from niriss_tools.grism.specgen import init_bagpipes_spec_gen
+
+            with multiprocessing.Pool(
+                processes=self.cpu_count,
+                initializer=init_bagpipes_spec_gen,
+                initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
+            ) as pool:
+
+                spec_lists, line_flux_dicts = zip(
+                    *pool.map(
+                        self.worker_gen_spec_and_fluxes,
+                        self.all_models_params[:10],
+                    )
+                )
+
+                self.model_spectra = np.array(spec_lists)
+                print(self.model_spectra.shape)
+
+                # # print (spec_lists)
+                # import matplotlib.pyplot as plt
+
+                # for s in spec_lists:
+                #     plt.plot(self.spec_wavs, s)
+                # plt.show()
+
+                # print (line_flux_dicts[0])
+
+                # self.line_names = np.array(list(line_flux_dicts[0].keys()))
+                self.line_names = np.array(config.line_names)
+                self.line_wavs_rf = np.array(config.line_wavs)
+
+                merged_line_flux_dict = {
+                    k: [d.get(k, np.nan) for d in line_flux_dicts]
+                    for k in self.line_names
+                }
+                self.line_fluxes = np.array(list(merged_line_flux_dict.values()))
+
+                # print (merged_line_flux_dict)
+
+                # dt = np.dtype([(k, np.array([v]).dtype) for k, v in line_flux_dicts[0].items()])
+                # values = [tuple(d[key] for key in dt.names) for d in line_flux_dicts]
+                # line_fluxes = np.array(values, dtype=dt)
+
+                # print (line_fluxes)
+
+        dummy_spec_gen = BagpipesSpecGenerator(
+            self.fit_instructions, self.veldisp, self.spec_wavs
+        )
+        dummy_spec_gen.sample(ast.literal_eval(self.all_models_params[0]))
+
+        model_comp = dummy_spec_gen.model_components
+
+        self.param_names = dummy_spec_gen.params
+        model_wavs_rf = dummy_spec_gen.model_gal.wavelengths
+
+        # print (self.param_names)
+
+        model_idxs = np.arange(10)
+
+        if "redshift" in self.param_names:
+            z_idx = (np.array(self.param_names) == "redshift").argmax()
+            model_redshifts = np.array(
+                [ast.literal_eval(m)[z_idx] for m in self.all_models_params[model_idxs]]
+            )
+
+        print(model_redshifts)
+
+        emline = "H  1  6562.80A"
+        # emline = ["H  1  6562.80A"]
+        emline = ["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
+        emline = [
+            "N  2  6583.45A",
+            "H  1  6562.80A",
+            "N  2  6548.05A",
+            "H  1  4861.32A",
+            "O  3  5006.84A",
+            "O  3  4958.91A",
+            "O  2  3726.03A",
+            "O  2  3728.81A",
+            "S  2  6730.82A",
+            "S  2  6716.44A",
+        ]
+
+        # Ensure that emission lines will always be an array
+        emline = np.atleast_1d(emline)
+
+        # Find the exact index of each emission line name
+        # (order must be preserved)
+        sorter = np.argsort(self.line_names)
+        emline_idxs = sorter[np.searchsorted(self.line_names, emline, sorter=sorter)]
+
+        print(emline_idxs)
+        print(self.line_fluxes.shape)
+
+        emline_wavs_rf = self.line_wavs_rf[emline_idxs] * (
+            1 + (model_comp["nebular"].get("velshift", 0) / (3 * 10**5))
+        )
+
+        wav_idxs = np.abs(model_wavs_rf[:, np.newaxis] - emline_wavs_rf).argmin(axis=0)
+
+        line_templates = np.zeros((len(model_idxs), len(model_wavs_rf)))
+
+        for wav_idx, line_idx in zip(wav_idxs, emline_idxs):
+            width = (model_wavs_rf[wav_idx + 1] - model_wavs_rf[wav_idx - 1]) / 2
+
+            print(wav_idx, width)
+            line_templates[:, wav_idx] = self.line_fluxes[line_idx, model_idxs] / width
+
+        # # zplusone = model_comp["redshift"] + 1.0
+        # print(line_templates)
+
+        print(line_templates.__sizeof__())
+        print(line_templates.shape)
+
+        # Replicate the same sampling used within bagpipes
+        if "veldisp" in list(model_comp):
+            vres = 3 * 10**5 / config.R_spec / 2.0
+            sigma_pix = model_comp["veldisp"] / vres
+            k_size = 4 * int(sigma_pix + 1)
+            x_kernel_pix = np.arange(-k_size, k_size + 1)
+
+            kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
+            kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
+
+            model_wavs_rf = model_wavs_rf[k_size:-k_size]
+
+            convolved_line_templates = np.apply_along_axis(
+                np.convolve, -1, line_templates, kernel, mode="valid"
+            )
+
+        else:
+            convolved_line_templates = line_templates
+
+        redshifted_wavs = (1 + model_redshifts)[:, np.newaxis] * model_wavs_rf
+
+        # if "R_curve" in list(model_comp):
+        #     oversample = 4  # Number of samples per FWHM at resolution R
+        #     new_wavs = dummy_spec_gen.model_gal._get_R_curve_wav_sampling(
+        #         oversample=oversample
+        #     )
+
+        #     # with multiprocessing.Pool(
+        #     #     processes=self.cpu_count,
+        #     # ) as pool:
+        #     #     resampled_spectra = np.array(
+        #     #         pool.starmap(
+        #     #             interp_conserve_c,
+        #     #             zip(
+        #     #                 repeat(new_wavs), redshifted_wavs, convolved_line_templates
+        #     #             ),
+        #     #         )
+        #     #     )
+        #     with multiprocessing.Pool(
+        #         processes=self.cpu_count,
+        #     ) as pool:
+        #         resampled_spectra = np.array(
+        #             pool.starmap(
+        #                 interp_conserve_c,
+        #                 zip(
+        #                     repeat(new_wavs),
+        #                     redshifted_wavs,
+        #                     convolved_line_templates,
+        #                 ),
+        #             )
+        #         )
+        #     redshifted_wavs = new_wavs
+
+        #     sigma_pix = oversample / 2.35  # sigma width of kernel in pixels
+        #     k_size = 4 * int(sigma_pix + 1)
+        #     x_kernel_pix = np.arange(-k_size, k_size + 1)
+
+        #     kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
+        #     kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
+
+        #     # Disperse non-uniformly sampled spectrum
+        #     spectrum = np.convolve(spectrum, kernel, mode="valid")
+        #     redshifted_wavs = redshifted_wavs[k_size:-k_size]
+
+        vac_redshifted_wavs = air_to_vac(redshifted_wavs)
+
+        with multiprocessing.Pool(
+            processes=self.cpu_count,
+        ) as pool:
+            model_line_fluxes = np.array(
+                pool.starmap(
+                    interp_conserve_c,
+                    zip(
+                        repeat(self.spec_wavs),
+                        vac_redshifted_wavs,
+                        convolved_line_templates,
+                    ),
+                )
+            )
+
+        model_line_fluxes = np.zeros(
+            (convolved_line_templates.shape[0], len(self.spec_wavs))
+        )
+
+        for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
+            model_line_fluxes[i] = interp_conserve_c(self.spec_wavs, w, c)
+
+        import matplotlib.pyplot as plt
+
+        # for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
+        #     plt.plot(w, c)
+
+        model_line_fluxes /= (1 + model_redshifts)[:, np.newaxis]
+
+        # for l in model_line_fluxes:
+        #     plt.plot(self.spec_wavs, l)
+        #     # plt.plot(self.spec_wavs, l / 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2)
+
+        # for m in model_idxs:
+        #     plt.plot(self.spec_wavs, self.model_spectra[m])
+
+        for m, l in zip(model_idxs, model_line_fluxes):
+            plt.plot(self.spec_wavs, self.model_spectra[m] - l)
+
+        plt.xlim(xmin=1e4, xmax=3e4)
+        plt.show()
+
+        exit()
+
+        if self.spec_units == "mujy":
+            fluxes /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
+
+        # self.spectrum = np.c_[self.spec_wavs, fluxes]
+
+        # print(len(model_wavs_rf))
+
+        # print(emline_wavs_rf)
+        # print(ind)
+        # print(model_wavs_rf[ind])
+
+    @staticmethod
+    def worker_gen_spec_and_fluxes(param_vector: str):
+
+        return spec_generator.sample(
+            ast.literal_eval(param_vector), return_line_fluxes=True
+        )
 
         # print (params_lists)
 
@@ -228,3 +487,4 @@ if __name__ == "__main__":
 
     print(template_sampler.posterior_ids)
     print(template_sampler.fit_instructions)
+    # print
