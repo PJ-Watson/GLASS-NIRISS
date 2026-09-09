@@ -207,6 +207,8 @@ class BagpipesTemplateSampler(TemplateSampler):
             this number of additional models will be generated. This is
             implemented by indexing the array of ``model_seeds``, and is
             by default ``0``.
+        **kwargs : dict, optional
+            Any additional keyword arguments.
         """
         assert n_extra_samples <= len(model_seeds), (
             "The number of models per additional region cannot "
@@ -249,7 +251,33 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         return
 
-    def gen_spectra_from_params(self, params_array: np.ndarray[str]):
+    def gen_spectra_from_params(
+        self, params_array: np.ndarray[str]
+    ) -> tuple[np.ndarray[float], np.ndarray[float]]:
+        """
+        Generate resampled spectra from a set of bagpipes parameters.
+
+        If all models were already generated, this simply returns the
+        relevant portions of those arrays.
+
+        Parameters
+        ----------
+        params_array : np.ndarray[str]
+            A 1D array of strings, each of which can be evaluated as a set
+            of parameters for `bagpipes`, following the setup specified in
+            `self.fit_instructions`.
+
+        Returns
+        -------
+        model_spectra : np.ndarray[float]
+            An ``(m x n)`` array of resampled spectra, for ``m`` models in
+            ``params_array``. The length of the spectra ``n`` is
+            determined by ``self.spec_wavs``.
+        model_line_fluxes : np.ndarray[float]
+            An ``(m x l)`` array of emission line fluxes, for ``m`` models
+            in ``params_array`` and ``l`` emission lines in
+            `bagpipes.config.line_names`.
+        """
 
         self.model_params = params_array
 
@@ -353,50 +381,42 @@ class BagpipesTemplateSampler(TemplateSampler):
             convolved_line_templates = line_templates
 
         redshifted_wavs = (1 + model_redshifts)[:, np.newaxis] * model_wavs_rf
-        # line_templates /= (1 + model_redshifts)[:, np.newaxis]
 
-        # if "R_curve" in list(model_comp):
-        #     oversample = 4  # Number of samples per FWHM at resolution R
-        #     new_wavs = dummy_spec_gen.model_gal._get_R_curve_wav_sampling(
-        #         oversample=oversample
-        #     )
+        if "R_curve" in list(model_comp):
+            oversample = 4  # Number of samples per FWHM at resolution R
+            new_wavs = dummy_spec_gen.model_gal._get_R_curve_wav_sampling(
+                oversample=oversample
+            )
 
-        #     # with multiprocessing.Pool(
-        #     #     processes=self.cpu_count,
-        #     # ) as pool:
-        #     #     resampled_spectra = np.array(
-        #     #         pool.starmap(
-        #     #             interp_conserve_c,
-        #     #             zip(
-        #     #                 repeat(new_wavs), redshifted_wavs, convolved_line_templates
-        #     #             ),
-        #     #         )
-        #     #     )
-        #     with multiprocessing.Pool(
-        #         processes=self.cpu_count,
-        #     ) as pool:
-        #         resampled_spectra = np.array(
-        #             pool.starmap(
-        #                 interp_conserve_c,
-        #                 zip(
-        #                     repeat(new_wavs),
-        #                     redshifted_wavs,
-        #                     convolved_line_templates,
-        #                 ),
-        #             )
-        #         )
-        #     redshifted_wavs = new_wavs
+            with multiprocessing.Pool(
+                processes=self.cpu_count,
+            ) as pool:
+                resampled_spectra = np.array(
+                    pool.starmap(
+                        interp_conserve_c,
+                        zip(
+                            repeat(new_wavs), redshifted_wavs, convolved_line_templates
+                        ),
+                    )
+                )
 
-        #     sigma_pix = oversample / 2.35  # sigma width of kernel in pixels
-        #     k_size = 4 * int(sigma_pix + 1)
-        #     x_kernel_pix = np.arange(-k_size, k_size + 1)
+            redshifted_wavs = np.tile(
+                new_wavs[np.newaxis, :], (resampled_spectra.shape[0], 1)
+            )
 
-        #     kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
-        #     kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
+            sigma_pix = oversample / 2.35  # sigma width of kernel in pixels
+            k_size = 4 * int(sigma_pix + 1)
+            x_kernel_pix = np.arange(-k_size, k_size + 1)
 
-        #     # Disperse non-uniformly sampled spectrum
-        #     spectrum = np.convolve(spectrum, kernel, mode="valid")
-        #     redshifted_wavs = redshifted_wavs[k_size:-k_size]
+            kernel = np.exp(-(x_kernel_pix**2) / (2 * sigma_pix**2))
+            kernel /= np.trapezoid(kernel)  # Explicitly normalise kernel
+
+            # Disperse non-uniformly sampled spectrum
+            # spectrum = np.convolve(spectrum, kernel, mode="valid")
+            convolved_line_templates = np.apply_along_axis(
+                np.convolve, -1, resampled_spectra, kernel, mode="valid"
+            )
+            redshifted_wavs = redshifted_wavs[:, k_size:-k_size]
 
         vac_redshifted_wavs = air_to_vac(redshifted_wavs)
 
