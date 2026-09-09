@@ -106,12 +106,16 @@ class BagpipesTemplateSampler(TemplateSampler):
         the number of spectra that may be sampled during fitting.
     veldisp : float, optional
         The velocity dispersion of the model galaxy in km/s, by default
-        ``250``.
+        ``50``.
     spec_wavs : np.ndarray[float], optional
         The wavelengths onto which the spectrum will be sampled, in
         Angstroms. By default, this is set to
         ``np.arange(10000.0, 23000.0, 22.5)``, covering the full range of
         JWST/NIRISS.
+    apply_R_curve : bool, optional
+        Implement the variable spectral resolution of the JWST/NIRISS
+        grisms when generating spectra, even if not in the original model
+        components. By default ``True``.
     """
 
     def __init__(
@@ -120,8 +124,9 @@ class BagpipesTemplateSampler(TemplateSampler):
         seed: int = 2744,
         cpu_count: int = multiprocessing.cpu_count(),
         cache_all_spectra: bool = True,
-        veldisp: float = 250,
+        veldisp: float = 50,
         spec_wavs: np.ndarray[float] = np.arange(10000.0, 23000.0, 22.5),
+        apply_R_curve: bool = True,
     ):
 
         super().__init__(seed)
@@ -141,6 +146,8 @@ class BagpipesTemplateSampler(TemplateSampler):
         self.fit_instructions = self.load_fit_instructions(
             posterior_dir / f"{self.posterior_ids[0]}.h5"
         )
+        if apply_R_curve:
+            self.add_niriss_R_curve(self.fit_instructions)
 
         self.veldisp = veldisp
         self.spec_wavs = spec_wavs
@@ -148,7 +155,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         with multiprocessing.Pool(self.cpu_count) as pool:
 
             params_lists = pool.map(
-                self._load_model_params,
+                self.load_model_params,
                 [posterior_dir / f"{i}.h5" for i in self.posterior_ids],
             )
 
@@ -245,8 +252,6 @@ class BagpipesTemplateSampler(TemplateSampler):
     def gen_spectra_from_params(self, params_array: np.ndarray[str]):
 
         self.model_params = params_array
-        print(self.model_params)
-        print(self.model_params[0])
 
         # Check if we already computed all possible spectra
         if self.all_model_spectra is not None:
@@ -266,7 +271,6 @@ class BagpipesTemplateSampler(TemplateSampler):
             initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
         ) as pool:
 
-            print("Running map")
             spec_lists, line_flux_dicts = zip(
                 *pool.map(
                     self.worker_gen_spec_and_fluxes,
@@ -274,18 +278,14 @@ class BagpipesTemplateSampler(TemplateSampler):
                 )
             )
 
-            print("Running map (finished)")
             model_spectra = np.array(spec_lists)
-
-            print("Converted to array")
+            del spec_lists
 
             merged_line_flux_dict = {
                 k: [d.get(k, np.nan) for d in line_flux_dicts] for k in self.line_names
             }
-
-            print("Converted to dict")
             model_line_fluxes = np.array(list(merged_line_flux_dict.values())).T
-            print("Made array")
+            del merged_line_flux_dict, line_flux_dicts
 
         return model_spectra, model_line_fluxes
 
@@ -305,34 +305,15 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         model_wavs_rf = dummy_spec_gen.model_gal.wavelengths
 
-        model_idxs = np.arange(3000)
-
         if "redshift" in self.param_names:
             z_idx = (np.array(self.param_names) == "redshift").argmax()
             model_redshifts = np.array(
-                [ast.literal_eval(m)[z_idx] for m in self.all_model_params[model_idxs]]
+                [ast.literal_eval(m)[z_idx] for m in self.model_params]
             )
-
-        # print(model_redshifts)
-
-        emline = "H  1  6562.80A"
-        # emline = ["H  1  6562.80A"]
-        emline = ["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
-        emline = [
-            "N  2  6583.45A",
-            "H  1  6562.80A",
-            "N  2  6548.05A",
-            "H  1  4861.32A",
-            "O  3  5006.84A",
-            "O  3  4958.91A",
-            "O  2  3726.03A",
-            "O  2  3728.81A",
-            "S  2  6730.82A",
-            "S  2  6716.44A",
-        ]
 
         # Ensure that emission lines will always be an array
         emline = np.atleast_1d(emline)
+        self.emline = emline
 
         # Find the exact index of each emission line name
         # (order must be preserved)
@@ -345,14 +326,12 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         wav_idxs = np.abs(model_wavs_rf[:, np.newaxis] - emline_wavs_rf).argmin(axis=0)
 
-        line_templates = np.zeros((len(model_idxs), len(model_wavs_rf)))
+        line_templates = np.zeros((len(self.model_params), len(model_wavs_rf)))
 
         for wav_idx, line_idx in zip(wav_idxs, emline_idxs):
             width = (model_wavs_rf[wav_idx + 1] - model_wavs_rf[wav_idx - 1]) / 2
 
-            line_templates[:, wav_idx] = (
-                self.model_line_fluxes[model_idxs, line_idx] / width
-            )
+            line_templates[:, wav_idx] = self.model_line_fluxes[:, line_idx] / width
 
         # Replicate the same sampling used within bagpipes
         if "veldisp" in list(model_comp):
@@ -374,6 +353,7 @@ class BagpipesTemplateSampler(TemplateSampler):
             convolved_line_templates = line_templates
 
         redshifted_wavs = (1 + model_redshifts)[:, np.newaxis] * model_wavs_rf
+        # line_templates /= (1 + model_redshifts)[:, np.newaxis]
 
         # if "R_curve" in list(model_comp):
         #     oversample = 4  # Number of samples per FWHM at resolution R
@@ -423,7 +403,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         with multiprocessing.Pool(
             processes=self.cpu_count,
         ) as pool:
-            model_line_fluxes = np.array(
+            self.model_emline_spectra = np.array(
                 pool.starmap(
                     interp_conserve_c,
                     zip(
@@ -434,27 +414,10 @@ class BagpipesTemplateSampler(TemplateSampler):
                 )
             )
 
-        # model_line_fluxes = np.zeros(
-        #     (convolved_line_templates.shape[0], len(self.spec_wavs))
-        # )
-
-        # for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
-        #     model_line_fluxes[i] = interp_conserve_c(self.spec_wavs, w, c)
-
-        import matplotlib.pyplot as plt
-
-        model_line_fluxes /= (1 + model_redshifts)[:, np.newaxis]
+        self.model_emline_spectra /= (1 + model_redshifts)[:, np.newaxis]
 
         if dummy_spec_gen.model_gal.spec_units == "mujy":
-            model_line_fluxes /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
-
-        for m, l in zip(model_idxs, model_line_fluxes):
-            plt.plot(self.spec_wavs, self.model_spectra[m] - l)
-
-        plt.xlim(xmin=1e4, xmax=3e4)
-        plt.show()
-
-        exit()
+            self.model_emline_spectra /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
 
     @staticmethod
     def worker_gen_spec_and_fluxes(param_vector: str):
@@ -478,7 +441,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         # rows in array 1 corresponding to model id in array 2 (N x 500(?))
 
     @staticmethod
-    def _load_model_params(posterior_path: Path) -> np.ndarray:
+    def load_model_params(posterior_path: Path) -> np.ndarray:
         """
         Convert a bagpipes posterior object to a 1D array of strings.
 
@@ -529,6 +492,34 @@ class BagpipesTemplateSampler(TemplateSampler):
             fit_instructions = eval(fit_info_str)
 
         return fit_instructions
+
+    @staticmethod
+    def add_niriss_R_curve(
+        fit_instructions: dict, wav_sampling: float = 100, wav_increment: float = 94
+    ):
+        """
+        Add the NIRISS spectral resolution curve to the model components.
+
+        The input is modified in place.
+
+        Parameters
+        ----------
+        fit_instructions : dict
+            A dictionary containing information about the model to be
+            generated.
+        wav_sampling : float, optional
+            The wavelength sampling of the R curve in Angstroms, by
+            default ``100``.
+        wav_increment : float, optional
+            The wavelength increment over 2 pixels, which determines the
+            spectral resolution of JWST/NIRISS. By default this is set to
+            ``94`` Angstroms, which is approximately the value for the 1st
+            order spectra in both grisms at the centre of the detector.
+        """
+
+        if not ("R_curve" in fit_instructions.keys()):
+            wavs = np.arange(0.5e4, 3e4, wav_sampling)
+            fit_instructions["R_curve"] = np.c_[wavs, wavs / wav_increment]
 
     # Cache the model seeds in self
     # e.g. calling `self.sample_spec_from_iter(iter_seed, posterior_id)`
@@ -586,12 +577,25 @@ if __name__ == "__main__":
         posterior_dir=posterior_dir, cache_all_spectra=False
     )
 
-    # print(template_sampler.posterior_ids)
-    # print(template_sampler.fit_instructions)
-    model_seeds, extra_region_idxs = template_sampler.gen_model_seeds_from_iter(0, 5, 3)
+    model_seeds, extra_region_idxs = template_sampler.gen_model_seeds_from_iter(0, 5, 5)
     template_sampler.gen_all_spectra_from_seeds(
-        model_seeds=model_seeds, extra_region_idxs=extra_region_idxs, n_extra_samples=2
+        model_seeds=model_seeds, extra_region_idxs=extra_region_idxs, n_extra_samples=1
     )
     template_sampler.gen_emline_spectra(
         emline=["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
+        # emline=["H  1  6562.80A"]
     )
+
+    import matplotlib.pyplot as plt
+
+    for i, (m, l) in enumerate(
+        zip(template_sampler.model_spectra, template_sampler.model_emline_spectra)
+    ):
+        if i > 10:
+            continue
+        plt.plot(template_sampler.spec_wavs, m - l)
+
+    plt.xlim(xmin=1e4, xmax=2.3e4)
+    plt.show()
+
+    exit()
