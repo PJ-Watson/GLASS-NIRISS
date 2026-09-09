@@ -321,6 +321,45 @@ class BagpipesTemplateSampler(TemplateSampler):
         self,
         emline: str | ArrayLike,
     ):
+        """
+        Generate emission line spectra from `self.model_params`.
+
+        This method expects both `self.model_params` and
+        `self.model_line_fluxes` to exist, so must typically be run after
+        `self.gen_spectra_from_params()`, or
+        `self.gen_all_spectra_from_seeds()`.
+
+        Parameters
+        ----------
+        emline : str | ArrayLike
+            The names of one or more emission lines, for which a resampled
+            spectrum will be calculated on the same wavelength grid as
+            `self.model_spectra`. The names are based on the
+            `Cloudy <https://www.nublado.org/>`__ naming convention (see
+            `here
+            <https://bagpipes.readthedocs.io/en/latest/model_galaxies.html\
+#getting-observables-line-fluxes>`__
+            for more details).
+        """
+
+        # Ensure that emission lines will always be an array
+        emline = np.atleast_1d(emline)
+
+        # If this has already been calculated, no need to redo it
+        if self.emline == emline:
+            return
+
+        if not (
+            hasattr(self, model_params)
+            & hasattr(self.model_line_fluxes)
+            & (len(self.model_params) == len(self.all_model_line_fluxes))
+        ):
+            raise ValueError(
+                "Either the model parameters or the line fluxes have not "
+                "been initialised correctly."
+            )
+
+        self.emline = emline
 
         dummy_spec_gen = BagpipesSpecGenerator(
             self.fit_instructions, self.veldisp, self.spec_wavs
@@ -338,10 +377,6 @@ class BagpipesTemplateSampler(TemplateSampler):
             model_redshifts = np.array(
                 [ast.literal_eval(m)[z_idx] for m in self.model_params]
             )
-
-        # Ensure that emission lines will always be an array
-        emline = np.atleast_1d(emline)
-        self.emline = emline
 
         # Find the exact index of each emission line name
         # (order must be preserved)
@@ -440,7 +475,25 @@ class BagpipesTemplateSampler(TemplateSampler):
             self.model_emline_spectra /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
 
     @staticmethod
-    def worker_gen_spec_and_fluxes(param_vector: str):
+    def worker_gen_spec_and_fluxes(param_vector: str) -> tuple[np.ndarray[float], dict]:
+        """
+        Generate a spectrum and emission line fluxes using `bagpipes`.
+
+        Parameters
+        ----------
+        param_vector : str
+            The string-formatted set of input parameters, typically in the
+            form of a list of floats.
+
+        Returns
+        -------
+        model_spectrum : np.ndarray[float]
+            The model spectrum, generated on the wavelength grid used to
+            initialise `spec_generator`.
+        line_fluxes : dict
+            The names and fluxes of all emission lines in the model
+            spectrum.
+        """
 
         return spec_generator.sample(
             ast.literal_eval(param_vector), return_line_fluxes=True
