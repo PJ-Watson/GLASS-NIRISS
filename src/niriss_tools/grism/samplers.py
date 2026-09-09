@@ -1,17 +1,17 @@
 """Classes for sampling model seeds and spectral templates."""
 
+import ast
 import multiprocessing
+from functools import partial
+from itertools import repeat
 from pathlib import Path
 
 import h5py
 import numpy as np
-import ast
-
 from bagpipes import config
-from niriss_tools.grism.specgen import BagpipesSpecGenerator, air_to_vac
-from functools import partial
-from itertools import repeat
 from grizli.utils_numba.interp import interp_conserve_c
+
+from niriss_tools.grism.specgen import BagpipesSpecGenerator, air_to_vac
 
 
 class TemplateSampler:
@@ -86,7 +86,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         posterior_dir: Path,
         seed: int = 2744,
         cpu_count: int = multiprocessing.cpu_count(),
-        cache_spectra: bool = True,
+        cache_all_spectra: bool = True,
         spec_wavs: np.ndarray = np.arange(10000.0, 23000.0, 22.5),
         veldisp: float = 250,
     ):
@@ -103,7 +103,7 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         self.cpu_count = cpu_count
 
-        self.cache_spectra = True
+        self.cache_all_spectra = cache_all_spectra
 
         self.fit_instructions = self.load_fit_instructions(
             posterior_dir / f"{self.posterior_ids[0]}.h5"
@@ -125,59 +125,106 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         self.all_models_params = u
 
-        # print (ast.literal_eval(self.all_models_params[0]))
-
-        # exit()
-
         self.posterior_params_map = inv.reshape(len(params_lists), -1)
 
-        # exit()
+        if self.cache_all_spectra:
 
-        if self.cache_spectra:
-            # from niriss_tools.grism.specgen import init_bagpipes_spec_gen
+            self.gen_spectra_from_params(self.all_models_params[:4000])
 
-            with multiprocessing.Pool(
-                processes=self.cpu_count,
-                initializer=init_bagpipes_spec_gen,
-                initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
-            ) as pool:
+            # return
 
-                spec_lists, line_flux_dicts = zip(
-                    *pool.map(
-                        self.worker_gen_spec_and_fluxes,
-                        self.all_models_params[:10],
-                    )
+    def gen_all_spectra_from_seeds(
+        self,
+        model_seeds: np.ndarray[int],
+        extra_region_idxs: np.ndarray[int] | None = None,
+        n_extra_samples: int = 0,
+        **kwargs,
+    ):
+        """
+        Generate all model spectra given a set of model seeds.
+
+        Optionally, generate ``n_extra_samples`` for each extra region
+        enumerated in ``extra_region_idxs``.
+
+        Parameters
+        ----------
+        model_seeds : np.ndarray[int]
+            The set of model seeds. In `bagpipes`, these are interpreted
+            as being the row indices in the 2D posterior parameter array.
+        extra_region_idxs : np.ndarray[int] | None, optional
+            A set of indices of extra regions to sample, by default
+            ``None``. This is implemented as an offset which wraps around,
+            providing a minimal description of the full set of sampled
+            regions.
+        n_extra_samples : int, optional
+            For each additional region sampled by ``extra_region_idxs``,
+            this number of additional models will be generated. This is
+            implemented by indexing the array of ``model_seeds``, and is
+            by default ``0``.
+        """
+        assert n_extra_samples <= len(model_seeds), (
+            "The number of models per additional region cannot "
+            "exceed the number of model seeds generated."
+        )
+
+        # Simple case: no extra samples
+        # These are the indices of `self.all_models_params`, which
+        # contains the actual model parameters. That array contains
+        # only unique values, whilst this is not guaranteed to.
+        all_models = self.posterior_params_map[:, model_seeds]
+
+        if (
+            (extra_region_idxs is not None)
+            & (len(extra_region_idxs) > 0)
+            & (n_extra_samples > 0)
+        ):
+            extra_ids = np.tile(
+                np.arange(len(self.posterior_ids))[:, np.newaxis, np.newaxis],
+                (1, len(extra_region_idxs), n_extra_samples),
+            )
+
+            # Ensure that the indexes don't exceed the length of the array
+            extra_ids = np.remainder(
+                extra_ids + extra_region_idxs[np.newaxis, :, np.newaxis],
+                len(self.posterior_ids),
+            )
+
+            extra_models = self.posterior_params_map[
+                extra_ids, model_seeds[:n_extra_samples]
+            ].reshape((len(self.posterior_ids), -1))
+
+            all_models = np.concatenate((all_models, extra_models), axis=-1)
+
+        # self.gen_spectra_from_params(self.all_models_params[])
+
+        return
+
+    def gen_spectra_from_params(self, params_array: np.ndarray):
+
+        self.model_params = params_array
+
+        with multiprocessing.Pool(
+            processes=self.cpu_count,
+            initializer=init_bagpipes_spec_gen,
+            initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
+        ) as pool:
+
+            spec_lists, line_flux_dicts = zip(
+                *pool.map(
+                    self.worker_gen_spec_and_fluxes,
+                    self.model_params,
                 )
+            )
 
-                self.model_spectra = np.array(spec_lists)
-                print(self.model_spectra.shape)
+            self.model_spectra = np.array(spec_lists)
 
-                # # print (spec_lists)
-                # import matplotlib.pyplot as plt
+            self.line_names = np.array(config.line_names)
+            self.line_wavs_rf = np.array(config.line_wavs)
 
-                # for s in spec_lists:
-                #     plt.plot(self.spec_wavs, s)
-                # plt.show()
-
-                # print (line_flux_dicts[0])
-
-                # self.line_names = np.array(list(line_flux_dicts[0].keys()))
-                self.line_names = np.array(config.line_names)
-                self.line_wavs_rf = np.array(config.line_wavs)
-
-                merged_line_flux_dict = {
-                    k: [d.get(k, np.nan) for d in line_flux_dicts]
-                    for k in self.line_names
-                }
-                self.line_fluxes = np.array(list(merged_line_flux_dict.values()))
-
-                # print (merged_line_flux_dict)
-
-                # dt = np.dtype([(k, np.array([v]).dtype) for k, v in line_flux_dicts[0].items()])
-                # values = [tuple(d[key] for key in dt.names) for d in line_flux_dicts]
-                # line_fluxes = np.array(values, dtype=dt)
-
-                # print (line_fluxes)
+            merged_line_flux_dict = {
+                k: [d.get(k, np.nan) for d in line_flux_dicts] for k in self.line_names
+            }
+            self.model_line_fluxes = np.array(list(merged_line_flux_dict.values()))
 
         dummy_spec_gen = BagpipesSpecGenerator(
             self.fit_instructions, self.veldisp, self.spec_wavs
@@ -189,9 +236,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         self.param_names = dummy_spec_gen.params
         model_wavs_rf = dummy_spec_gen.model_gal.wavelengths
 
-        # print (self.param_names)
-
-        model_idxs = np.arange(10)
+        model_idxs = np.arange(3000)
 
         if "redshift" in self.param_names:
             z_idx = (np.array(self.param_names) == "redshift").argmax()
@@ -225,9 +270,6 @@ class BagpipesTemplateSampler(TemplateSampler):
         sorter = np.argsort(self.line_names)
         emline_idxs = sorter[np.searchsorted(self.line_names, emline, sorter=sorter)]
 
-        print(emline_idxs)
-        print(self.line_fluxes.shape)
-
         emline_wavs_rf = self.line_wavs_rf[emline_idxs] * (
             1 + (model_comp["nebular"].get("velshift", 0) / (3 * 10**5))
         )
@@ -239,14 +281,9 @@ class BagpipesTemplateSampler(TemplateSampler):
         for wav_idx, line_idx in zip(wav_idxs, emline_idxs):
             width = (model_wavs_rf[wav_idx + 1] - model_wavs_rf[wav_idx - 1]) / 2
 
-            print(wav_idx, width)
-            line_templates[:, wav_idx] = self.line_fluxes[line_idx, model_idxs] / width
-
-        # # zplusone = model_comp["redshift"] + 1.0
-        # print(line_templates)
-
-        print(line_templates.__sizeof__())
-        print(line_templates.shape)
+            line_templates[:, wav_idx] = (
+                self.model_line_fluxes[line_idx, model_idxs] / width
+            )
 
         # Replicate the same sampling used within bagpipes
         if "veldisp" in list(model_comp):
@@ -328,26 +365,19 @@ class BagpipesTemplateSampler(TemplateSampler):
                 )
             )
 
-        model_line_fluxes = np.zeros(
-            (convolved_line_templates.shape[0], len(self.spec_wavs))
-        )
+        # model_line_fluxes = np.zeros(
+        #     (convolved_line_templates.shape[0], len(self.spec_wavs))
+        # )
 
-        for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
-            model_line_fluxes[i] = interp_conserve_c(self.spec_wavs, w, c)
+        # for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
+        #     model_line_fluxes[i] = interp_conserve_c(self.spec_wavs, w, c)
 
         import matplotlib.pyplot as plt
 
-        # for i, (w, c) in enumerate(zip(vac_redshifted_wavs, convolved_line_templates)):
-        #     plt.plot(w, c)
-
         model_line_fluxes /= (1 + model_redshifts)[:, np.newaxis]
 
-        # for l in model_line_fluxes:
-        #     plt.plot(self.spec_wavs, l)
-        #     # plt.plot(self.spec_wavs, l / 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2)
-
-        # for m in model_idxs:
-        #     plt.plot(self.spec_wavs, self.model_spectra[m])
+        if dummy_spec_gen.model_gal.spec_units == "mujy":
+            model_line_fluxes /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
 
         for m, l in zip(model_idxs, model_line_fluxes):
             plt.plot(self.spec_wavs, self.model_spectra[m] - l)
@@ -356,17 +386,6 @@ class BagpipesTemplateSampler(TemplateSampler):
         plt.show()
 
         exit()
-
-        if self.spec_units == "mujy":
-            fluxes /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
-
-        # self.spectrum = np.c_[self.spec_wavs, fluxes]
-
-        # print(len(model_wavs_rf))
-
-        # print(emline_wavs_rf)
-        # print(ind)
-        # print(model_wavs_rf[ind])
 
     @staticmethod
     def worker_gen_spec_and_fluxes(param_vector: str):
@@ -447,8 +466,8 @@ class BagpipesTemplateSampler(TemplateSampler):
     # checks if self.model_seeds[iter_seed] already exists
 
     def gen_model_seeds_from_iter(
-        self, iter_seed: int, n_samples: int, **kwargs
-    ) -> list[int]:
+        self, iter_seed: int, n_samples: int, n_extra_regions: int = 0, **kwargs
+    ) -> tuple[np.ndarray[int], np.ndarray[int]]:
         """
         Construct a list of model seeds for a given iteration.
 
@@ -459,20 +478,31 @@ class BagpipesTemplateSampler(TemplateSampler):
             iterations already performed.
         n_samples : int
             The number of model seeds to generate.
+        n_extra_regions : int
+            The number of additional regions that will be sampled, by
+            default ``0``.
         **kwargs : dict
             Any additional keyword parameters.
 
         Returns
         -------
-        list[int]
+        model_seeds : np.ndarray[int]
             The list of model seeds.
+        extra_region_idxs : np.ndarray[int]
+            The indices of the additional regions to sample.
         """
 
         iter_rng = np.random.Generator(np.random.PCG64(self.seed + iter_seed))
 
-        init_samples = iter_rng.random(size=n_samples)
+        model_seeds = iter_rng.choice(
+            np.arange(self.posterior_params_map.shape[-1]), size=n_samples
+        ).astype(int)
 
-        return init_samples
+        extra_region_idxs = iter_rng.choice(
+            np.arange(len(self.posterior_ids)), size=n_extra_regions
+        ).astype(int)
+
+        return model_seeds, extra_region_idxs
 
 
 if __name__ == "__main__":
@@ -483,8 +513,13 @@ if __name__ == "__main__":
         "3070_colour_3_10_jwst-nircam-f150w"
     )
 
-    template_sampler = BagpipesTemplateSampler(posterior_dir=posterior_dir)
+    template_sampler = BagpipesTemplateSampler(
+        posterior_dir=posterior_dir, cache_all_spectra=False
+    )
 
     print(template_sampler.posterior_ids)
     print(template_sampler.fit_instructions)
-    # print
+    model_seeds, extra_region_idxs = template_sampler.gen_model_seeds_from_iter(0, 5, 3)
+    template_sampler.gen_all_spectra_from_seeds(
+        model_seeds=model_seeds, extra_region_idxs=extra_region_idxs, n_extra_samples=2
+    )
