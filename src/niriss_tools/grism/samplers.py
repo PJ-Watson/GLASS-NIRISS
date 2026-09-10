@@ -275,8 +275,10 @@ class BagpipesTemplateSampler(TemplateSampler):
         model_spectra, model_line_fluxes = self.gen_spectra_from_params(
             self.all_model_params[unique_models].ravel()
         )
+
         self.model_spectra = model_spectra[unique_models_inv]
         self.model_line_fluxes = model_line_fluxes[unique_models_inv]
+        self.model_params = self.model_params[unique_models_inv]
 
         if shared_memory_manger is not None:
             if (shared_memory_name is not None) and (shared_memory_shape is not None):
@@ -397,14 +399,10 @@ class BagpipesTemplateSampler(TemplateSampler):
         # Ensure that emission lines will always be an array
         emline = np.atleast_1d(emline)
 
-        # If this has already been calculated, no need to redo it
-        if self.emline == emline:
-            return
-
         if not (
-            hasattr(self, model_params)
-            & hasattr(self.model_line_fluxes)
-            & (len(self.model_params) == len(self.all_model_line_fluxes))
+            hasattr(self, "model_params")
+            & hasattr(self, "model_line_fluxes")
+            & (len(self.model_params) == len(self.model_line_fluxes))
         ):
             raise ValueError(
                 "Either the model parameters or the line fluxes have not "
@@ -412,6 +410,11 @@ class BagpipesTemplateSampler(TemplateSampler):
             )
 
         self.emline = emline
+
+        unique_params, unique_idxs, unique_inv = np.unique(
+            self.model_params, return_index=True, return_inverse=True
+        )
+        unique_line_fluxes = self.model_line_fluxes[unique_idxs]
 
         dummy_spec_gen = BagpipesSpecGenerator(
             self.fit_instructions, self.veldisp, self.spec_wavs
@@ -427,7 +430,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         if "redshift" in self.param_names:
             z_idx = (np.array(self.param_names) == "redshift").argmax()
             model_redshifts = np.array(
-                [ast.literal_eval(m)[z_idx] for m in self.model_params]
+                [ast.literal_eval(m)[z_idx] for m in unique_params]
             )
 
         # Find the exact index of each emission line name
@@ -441,12 +444,12 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         wav_idxs = np.abs(model_wavs_rf[:, np.newaxis] - emline_wavs_rf).argmin(axis=0)
 
-        line_templates = np.zeros((len(self.model_params), len(model_wavs_rf)))
+        line_templates = np.zeros((len(unique_params), len(model_wavs_rf)))
 
         for wav_idx, line_idx in zip(wav_idxs, emline_idxs):
             width = (model_wavs_rf[wav_idx + 1] - model_wavs_rf[wav_idx - 1]) / 2
 
-            line_templates[:, wav_idx] = self.model_line_fluxes[:, line_idx] / width
+            line_templates[:, wav_idx] = unique_line_fluxes[:, line_idx] / width
 
         # Replicate the same sampling used within bagpipes
         if "veldisp" in list(model_comp):
@@ -522,6 +525,8 @@ class BagpipesTemplateSampler(TemplateSampler):
             )
 
         self.model_emline_spectra /= (1 + model_redshifts)[:, np.newaxis]
+
+        self.model_emline_spectra = self.model_emline_spectra[unique_inv]
 
         if dummy_spec_gen.model_gal.spec_units == "mujy":
             self.model_emline_spectra /= 10**-29 * 2.9979 * 10**18 / self.spec_wavs**2
@@ -711,10 +716,12 @@ if __name__ == "__main__":
         model_seeds=model_seeds, extra_region_idxs=extra_region_idxs, n_extra_samples=1
     )
     print(template_sampler.model_spectra.shape)
-    # template_sampler.gen_emline_spectra(
-    #     emline=["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
-    #     # emline=["H  1  6562.80A"]
-    # )
+    print(template_sampler.model_params.shape)
+    template_sampler.gen_emline_spectra(
+        emline=["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
+        # emline=["H  1  6562.80A"]
+    )
+    print(template_sampler.model_emline_spectra.shape)
 
     # import matplotlib.pyplot as plt
 
