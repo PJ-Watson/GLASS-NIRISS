@@ -4,6 +4,7 @@ import ast
 import multiprocessing
 from functools import partial
 from itertools import repeat
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import h5py
@@ -12,6 +13,7 @@ from bagpipes import config
 from grizli.utils_numba.interp import interp_conserve_c
 from numpy.typing import ArrayLike
 
+from niriss_tools.grism import float_dtype
 from niriss_tools.grism.specgen import BagpipesSpecGenerator, air_to_vac
 
 

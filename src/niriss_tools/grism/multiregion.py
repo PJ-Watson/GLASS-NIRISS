@@ -32,9 +32,10 @@ from reproject import reproject_interp
 
 import niriss_tools
 from niriss_tools.grism.fitting_tools import CDNNLS, fennls, fnnls
+from niriss_tools.grism.samplers import BagpipesTemplateSampler
 from niriss_tools.grism.specgen import (
     CLOUDY_LINE_MAP,
-    BagpipesSampler,
+    BagpipesSpecGenerator,
     check_coverage,
     pre_gen_spec,
 )
@@ -53,13 +54,17 @@ TODO: remove logic from _gen functions. Instead create template IDs as
 Simplify model generation and combine output table columns into "tempID".
 """
 
-# Allow for environment variable override if necessary
-float_dtype = os.getenv("MULTIREGION_FLOAT_DTYPE", np.float32)
+from niriss_tools.grism import float_dtype
 
 __all__ = ["MultiRegionFit", "DEFAULT_PLINE"]
 
+# Necessary to avoid bugs in shared memory garbage collection
 pipes_sampler = None
 beams_object = None
+shm_temp_arr = None
+shared_temp_arr = None
+shm_model_spectra = None
+shared_model_spectra = None
 
 DEFAULT_PLINE = {
     "pixscale": 0.06,
