@@ -699,6 +699,13 @@ class BagpipesTemplateSampler(TemplateSampler):
         return model_seeds, extra_region_idxs
 
 
+def _test_process_affinity(task_id):
+
+    import psutil
+
+    print(f"{task_id} : {psutil.Process()} : {psutil.Process().cpu_affinity()}")
+
+
 if __name__ == "__main__":
 
     posterior_dir = Path(

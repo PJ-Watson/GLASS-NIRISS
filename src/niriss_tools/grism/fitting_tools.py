@@ -8,10 +8,13 @@ from numba import njit
 from numpy.typing import ArrayLike
 from scipy import sparse
 
+from niriss_tools.grism import float_dtype
+
 __all__ = ["CDNNLS", "fnnls", "fennls"]
 
 try:
     import fnnlsEigen as fe
+
     HAS_EIGEN = True
 except:
     HAS_EIGEN = False
@@ -42,10 +45,15 @@ def fennls(
     """
     if not HAS_EIGEN:
         raise ImportError("FNNLS Eigen is not installed.")
+    if float_dtype == np.float32:
+        fnnls_fn = fe.fnnlsf
+    else:
+        fnnls_fn = fe.fnnls
+
     try:
-        return fe.fnnls(
-            np.ascontiguousarray(A, dtype=np.float32),
-            x.astype(np.float32),
+        return fnnls_fn(
+            np.ascontiguousarray(A, dtype=float_dtype),
+            x.astype(float_dtype),
             max_iterations=max_iterations,
             tolerance=tolerance,
         )

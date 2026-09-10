@@ -12,4 +12,4 @@ import os
 import numpy as np
 
 # Allow for environment variable override if necessary
-float_dtype = os.getenv("MULTIREGION_FLOAT_DTYPE", np.float64)
+float_dtype = np.dtype(os.getenv("MULTIREGION_FLOAT_DTYPE", "f8")).type
