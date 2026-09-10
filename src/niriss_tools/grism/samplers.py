@@ -4,7 +4,7 @@ import ast
 import multiprocessing
 from functools import partial
 from itertools import repeat
-from multiprocessing import shared_memory
+from multiprocessing.managers import SharedMemoryManager
 from pathlib import Path
 
 import h5py
@@ -179,15 +179,17 @@ class BagpipesTemplateSampler(TemplateSampler):
             self.all_model_spectra, self.all_model_line_fluxes = (
                 self.gen_spectra_from_params(self.all_model_params[:10000])
             )
-            print(self.all_model_line_fluxes.shape)
 
     def gen_all_spectra_from_seeds(
         self,
         model_seeds: np.ndarray[int],
         extra_region_idxs: np.ndarray[int] | None = None,
         n_extra_samples: int = 0,
+        shared_memory_manger: SharedMemoryManager | None = None,
+        shared_memory_name: str | None = None,
+        shared_memory_shape: tuple[int] | None = None,
         **kwargs,
-    ):
+    ) -> tuple[str, tuple[int]] | None:
         """
         Generate all model spectra given a set of model seeds.
 
@@ -209,9 +211,28 @@ class BagpipesTemplateSampler(TemplateSampler):
             this number of additional models will be generated. This is
             implemented by indexing the array of ``model_seeds``, and is
             by default ``0``.
+        shared_memory_manger : SharedMemoryManager | None, optional
+            An instance of a SharedMemoryManager, by default ``None``. If
+            not ``None``, ``self.model_spectra`` will be copied into
+            shared memory, to allow direct access from other processes.
+        shared_memory_name : str | None, optional
+            The name of the shared memory block to use. If ``None`` (the
+            default), a new object will be created.
+        shared_memory_shape : tuple[int] | None, optional
+            The shape of the shared memory block, by default ``None``.
         **kwargs : dict, optional
             Any additional keyword arguments.
+
+        Returns
+        -------
+        shared_memory_name : str, optional
+            The name of the shared memory block. Only returned if
+            ``shared_memory_manager`` is not ``None``.
+        shared_memory_shape : tuple[int], optional
+            The shape of the shared memory block. Only returned if
+            ``shared_memory_manager`` is not ``None``.
         """
+
         assert n_extra_samples <= len(model_seeds), (
             "The number of models per additional region cannot "
             "exceed the number of model seeds generated."
@@ -245,11 +266,40 @@ class BagpipesTemplateSampler(TemplateSampler):
 
             all_models = np.concatenate((all_models, extra_models), axis=-1)
 
-        # print (len(np.unique(all_models)))
+        all_models_shape = all_models.shape
 
-        self.model_spectra, self.model_line_fluxes = self.gen_spectra_from_params(
-            self.all_model_params[all_models].ravel()
+        unique_models, unique_models_inv = np.unique(
+            all_models.ravel(), return_inverse=True
         )
+
+        model_spectra, model_line_fluxes = self.gen_spectra_from_params(
+            self.all_model_params[unique_models].ravel()
+        )
+        self.model_spectra = model_spectra[unique_models_inv]
+        self.model_line_fluxes = model_line_fluxes[unique_models_inv]
+
+        if shared_memory_manger is not None:
+            if (shared_memory_name is not None) and (shared_memory_shape is not None):
+                shm_model_spectra = multiprocessing.shared_memory.SharedMemory(
+                    name=shared_memory_name, create=False
+                )
+                model_spectra_arr = np.ndarray(
+                    shared_memory_shape, dtype=float_dtype, buffer=shm_model_spectra.buf
+                )
+            else:
+                shared_memory_shape = (*all_models_shape, self.model_spectra.shape[-1])
+                shm_model_spectra = shared_memory_manger.SharedMemory(
+                    size=np.dtype(float_dtype).itemsize * np.prod(shared_memory_shape),
+                )
+                model_spectra_arr = np.ndarray(
+                    shared_memory_shape,
+                    dtype=float_dtype,
+                    buffer=shm_model_spectra.buf,
+                )
+            model_spectra_arr[:] = self.model_spectra.reshape(
+                shared_memory_shape
+            ).astype(float_dtype)
+            return shm_model_spectra.name, model_spectra_arr.shape
 
         return
 
@@ -630,11 +680,15 @@ class BagpipesTemplateSampler(TemplateSampler):
         iter_rng = np.random.Generator(np.random.PCG64(self.seed + iter_seed))
 
         model_seeds = iter_rng.choice(
-            np.arange(self.posterior_params_map.shape[-1]), size=n_samples
+            np.arange(self.posterior_params_map.shape[-1]),
+            size=n_samples,
+            replace=False,
         ).astype(int)
 
         extra_region_idxs = iter_rng.choice(
-            np.arange(len(self.posterior_ids)), size=n_extra_regions
+            np.arange(len(self.posterior_ids)),
+            size=n_extra_regions,
+            replace=False if n_extra_regions <= len(self.posterior_ids) else True,
         ).astype(int)
 
         return model_seeds, extra_region_idxs
@@ -656,21 +710,22 @@ if __name__ == "__main__":
     template_sampler.gen_all_spectra_from_seeds(
         model_seeds=model_seeds, extra_region_idxs=extra_region_idxs, n_extra_samples=1
     )
-    template_sampler.gen_emline_spectra(
-        emline=["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
-        # emline=["H  1  6562.80A"]
-    )
+    print(template_sampler.model_spectra.shape)
+    # template_sampler.gen_emline_spectra(
+    #     emline=["H  1  6562.80A", "N  2  6583.45A", "N  2  6548.05A"]
+    #     # emline=["H  1  6562.80A"]
+    # )
 
-    import matplotlib.pyplot as plt
+    # import matplotlib.pyplot as plt
 
-    for i, (m, l) in enumerate(
-        zip(template_sampler.model_spectra, template_sampler.model_emline_spectra)
-    ):
-        if i > 10:
-            continue
-        plt.plot(template_sampler.spec_wavs, m - l)
+    # for i, (m, l) in enumerate(
+    #     zip(template_sampler.model_spectra, template_sampler.model_emline_spectra)
+    # ):
+    #     if i > 10:
+    #         continue
+    #     plt.plot(template_sampler.spec_wavs, m - l)
 
-    plt.xlim(xmin=1e4, xmax=2.3e4)
-    plt.show()
+    # plt.xlim(xmin=1e4, xmax=2.3e4)
+    # plt.show()
 
-    exit()
+    # exit()
