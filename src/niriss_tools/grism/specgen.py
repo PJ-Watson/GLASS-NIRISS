@@ -832,13 +832,16 @@ class BagpipesSpecGenerator(object):
     veldisp : float, optional
         The velocity dispersion of the model galaxy in km/s. By default
         ``veldisp=500``.
+    spec_wavs : np.ndarray[float] | None, optional
+        The wavelengths onto which the spectrum will be resampled (in
+        Angstroms), by default ``np.arange(1e4, 2.3e4, 22.5)``.
     """
 
     def __init__(
         self,
         fit_instructions: dict,
         veldisp: float = 500.0,
-        spec_wavs: np.ndarray = np.arange(1e4, 2.3e4, 22.5),
+        spec_wavs: np.ndarray[float] | None = np.arange(1e4, 2.3e4, 22.5),
     ):
 
         self.fit_instructions = deepcopy(fit_instructions)
@@ -988,8 +991,6 @@ class BagpipesSpecGenerator(object):
 
             new_components[comp]["tx"] = tx
 
-        # new_components["veldisp"] = 1100.
-
         return new_components
 
     def sample(
@@ -1014,11 +1015,12 @@ class BagpipesSpecGenerator(object):
             The names of one or more lines to exclude from the model
             spectrum, based on the `Cloudy <https://www.nublado.org/>`__
             naming convention (see `here
-            <https://bagpipes.readthedocs.io/en/latest/model_galaxies.html#getting-observables-line-fluxes>`__
+            <https://bagpipes.readthedocs.io/en/latest/model_galaxies.html\
+#getting-observables-line-fluxes>`__
             for more details). By default ``None``.
-        return_line_flux : bool, optional
+        return_line_fluxes : bool, optional
             If ``True``, return the total line flux for all lines named in
-            ``rm_line``. By default ``False``.
+            `~bagpipes.config.line_names`. By default ``False``.
         **model_kwargs : dict, optional
             Any additional keyword arguments to pass to
             `~niriss_tools.grism.specgen.ExtendedModelGalaxy`.
@@ -1057,7 +1059,6 @@ def create_spec_file(
     posterior_dir: Path | None = None,
     spec_dir: Path | None = None,
     spec_wavs: ArrayLike | None = None,
-    spec_cache: dict | None = None,
 ) -> None:
     """
     Generated resampled spectra from a bagpipes posterior output.
@@ -1092,12 +1093,10 @@ def create_spec_file(
             spec_data = np.zeros((unique_vectors.shape[0], spec_wavs.shape[0]))
 
             for s_i, param_vector in enumerate(unique_vectors):
-                if not repr(param_vector) in spec_cache.keys():
-                    spec_cache[repr(param_vector)] = spec_generator.sample(
-                        param_vector,
-                        spec_wavs=spec_wavs,
-                    )[1]
-                spec_data[s_i] = spec_cache[repr(param_vector)]
+                spec_data[s_i] = spec_sampler.sample(
+                    param_vector,
+                    spec_wavs=spec_wavs,
+                )[1]
 
             spec_file.create_dataset("spec_data", data=spec_data[unique_inv])
 
@@ -1153,101 +1152,26 @@ def pre_gen_spec(
     def _update(*a):
         pbar.update()
 
-    with Manager() as manager:
-
-        spec_cache = manager.dict()
-
-        with Pool(
-            processes=cpu_count,
-            initializer=init_bagpipes_spec_gen,
-            initargs=(
-                fit_instructions,
-                veldisp,
-            ),
-        ) as pool:
-            for p_i, p in enumerate(post_ids[:48]):
-                pool.apply_async(
-                    create_spec_file,
-                    (p,),
-                    kwds=dict(
-                        posterior_dir=posterior_dir,
-                        spec_dir=spec_dir,
-                        spec_wavs=spec_wavs,
-                        spec_cache=spec_cache,
-                    ),
-                    error_callback=print,
-                    callback=_update,
-                )
-            pool.close()
-            pool.join()
-            pbar.close()
-
-        # print (spec_cache)
-        print(len(list(spec_cache.keys())))
-        print(len(list(spec_cache.keys())) / 48)
-        exit()
-
-
-def resample_pipes(temp_IDs: list[str], spec_wavs: ArrayLike) -> tuple:
-
-    temps_resampled = np.zeros((len(temp_IDs), spec_wavs.shape[0]))
-
-    seg_ids = []
-
-    if spectral_dir is not None:
-
-        temps_resampled = np.zeros(
-            (len(rows) + len(id_shifts) * n_shifted_rows, spec_wavs.shape[0])
-        )
-        with h5py.File(
-            Path(spectral_dir) / f"{seg_id}.h5",
-            "r",
-        ) as spec_file:
-            temps_resampled[: len(rows), :] = np.array(spec_file["spec_data"])[rows]
-
-        # Just make one set of templates from all possible seg ids
-        if (id_shifts is not None) and (len(id_shifts) > 0):
-            for s_i, s in enumerate(id_shifts):
-                shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
-                with h5py.File(
-                    Path(spectral_dir) / f"{shifted_id}.h5",
-                    "r",
-                ) as spec_file:
-                    temps_resampled[
-                        int(len(rows) + s_i * n_shifted_rows) : int(
-                            len(rows) + (s_i + 1) * n_shifted_rows
-                        ) :
-                    ] = np.array(spec_file["spec_data"])[rows[:n_shifted_rows]]
-
-    else:
-        with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
-            samples2d = np.zeros(
-                (
-                    len(rows) + len(id_shifts) * n_shifted_rows,
-                    post_file["samples2d"].shape[1],
-                )
+    with Pool(
+        processes=cpu_count,
+        initializer=init_bagpipes_spec_gen,
+        initargs=(
+            fit_instructions,
+            veldisp,
+        ),
+    ) as pool:
+        for p_i, p in enumerate(post_ids):
+            pool.apply_async(
+                create_spec_file,
+                (p,),
+                kwds=dict(
+                    posterior_dir=posterior_dir,
+                    spec_dir=spec_dir,
+                    spec_wavs=spec_wavs,
+                ),
+                error_callback=print,
+                callback=_update,
             )
-            samples2d[: len(rows), :] = np.array(post_file["samples2d"])[rows]
-
-        # Just make one set of posterior samples from all possible seg ids
-        if (id_shifts is not None) and (len(id_shifts) > 0):
-            for s_i, s in enumerate(id_shifts):
-                shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
-                with h5py.File(
-                    Path(posterior_dir) / f"{shifted_id}.h5", "r"
-                ) as post_file:
-                    samples2d[
-                        int(len(rows) + s_i * n_shifted_rows) : int(
-                            len(rows) + (s_i + 1) * n_shifted_rows
-                        ) :
-                    ] = np.array(post_file["samples2d"])[rows[:n_shifted_rows]]
-
-        temps_resampled = np.zeros((samples2d.shape[0], spec_wavs.shape[0]))
-        for sample_i, sample in enumerate(samples2d):
-
-            temps_resampled[sample_i] = pipes_sampler.sample(
-                sample,
-                spec_wavs=spec_wavs,
-                cont_only=cont_only,
-                rm_line=rm_line,
-            )[1]
+        pool.close()
+        pool.join()
+        pbar.close()

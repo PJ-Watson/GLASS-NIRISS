@@ -556,20 +556,6 @@ class BagpipesTemplateSampler(TemplateSampler):
             ast.literal_eval(param_vector), return_line_fluxes=True
         )
 
-        # print (params_lists)
-
-        # array 1:
-        # 1 spectrum per row (M x spec wavs)
-
-        # array 2: self.all_model_params
-        # model id, aka string of model parameters (M,)
-
-        # array 3: self.posterior_ids
-        # N posterior ids
-
-        # array 4: self.posterior_params_map
-        # rows in array 1 corresponding to model id in array 2 (N x 500(?))
-
     @staticmethod
     def load_model_params(posterior_path: Path) -> np.ndarray:
         """
