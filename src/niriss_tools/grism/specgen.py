@@ -11,7 +11,6 @@ from pathlib import Path
 import bagpipes
 import h5py
 import numpy as np
-import spectres
 from bagpipes import config, filters, utils
 from bagpipes.input.spectral_indices import measure_index
 from bagpipes.models import chemical_enrichment_history
@@ -21,8 +20,6 @@ from bagpipes.models.agn_model import agn
 from bagpipes.models.dust_attenuation_model import dust_attenuation
 from bagpipes.models.dust_emission_model import dust_emission
 from bagpipes.models.igm_model import igm
-
-# from bagpipes.models.agn_model import agn
 from bagpipes.models.nebular_model import nebular
 from bagpipes.models.stellar_model import stellar
 from grizli.utils_numba.interp import interp_conserve_c
@@ -35,7 +32,8 @@ __all__ = [
     "check_coverage",
     "NIRISS_050_FILTER_LIMITS",
     "NIRISS_001_FILTER_LIMITS",
-    "BagpipesSampler",
+    "BagpipesSpecGenerator",
+    "air_to_vac",
 ]
 
 CLOUDY_LINE_MAP = [
@@ -599,21 +597,6 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
                 grid, t_bc, model_comp["nebular"]["logU"]
             )
 
-            if rm_line is not None:
-                rm_line = np.atleast_1d(rm_line).ravel()
-                for rm in rm_line:
-                    rm_line_idx = np.argwhere(config.line_names == rm)
-
-                    line_wav_shift = config.line_wavs[rm_line_idx] * (
-                        1 + (model_comp["nebular"].get("velshift", 0) / (3 * 10**5))
-                    )
-                    ind = np.abs(self.wavelengths - line_wav_shift).argmin()
-                    if ind != 0 and ind != self.wavelengths.shape[0] - 1:
-                        width = (
-                            self.wavelengths[ind + 1] - self.wavelengths[ind - 1]
-                        ) / 2
-                        spectrum_bc[ind] -= em_lines[rm_line_idx] / width
-
         # Add attenuation due to stellar birth clouds.
         if self.dust_atten:
             dust_flux = 0.0  # Total attenuated flux for energy balance.
@@ -657,6 +640,7 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             trans = 10 ** (-model_comp["dust"]["Av"] * self.dust_atten.A_cont / 2.5)
             dust_spectrum = spectrum * trans
             dust_spectrum_bc = spectrum_bc * trans
+
             dust_flux += np.trapezoid(spectrum - dust_spectrum, x=self.wavelengths)
             dust_flux += np.trapezoid(
                 spectrum_bc - dust_spectrum_bc, x=self.wavelengths
@@ -667,6 +651,7 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
                 + dust_spectrum_bc * (1.0 - fesc)
                 + spectrum_bc_f100 * fesc
             )
+
             self.spectrum_bc = (spectrum_bc * trans) * (
                 1.0 - fesc
             ) + spectrum_bc_f100 * fesc
@@ -715,9 +700,6 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             spectrum *= self.dla_trans
             if self.dust_atten:
                 self.spectrum_bc *= self.dla_trans
-
-        if self.dust_atten:
-            self.spectrum_bc *= self.igm.trans(model_comp["redshift"])
 
         # Convert from luminosity to observed flux at redshift z.
         self.lum_flux = 1.0
@@ -788,8 +770,7 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             oversample = 4  # Number of samples per FWHM at resolution R
             new_wavs = self._get_R_curve_wav_sampling(oversample=oversample)
 
-            # spectrum = np.interp(new_wavs, redshifted_wavs, spectrum)
-            spectrum = spectres.spectres(new_wavs, redshifted_wavs, spectrum, fill=0)
+            spectrum = interp_conserve_c(new_wavs, redshifted_wavs, spectrum)
             redshifted_wavs = new_wavs
 
             sigma_pix = oversample / 2.35  # sigma width of kernel in pixels
@@ -803,15 +784,9 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
             spectrum = np.convolve(spectrum, kernel, mode="valid")
             redshifted_wavs = redshifted_wavs[k_size:-k_size]
 
-        # Converted to using spectres in response to issue with interp,
-        # see https://github.com/ACCarnall/bagpipes/issues/15
-        # fluxes = np.interp(self.spec_wavs, redshifted_wavs,
-        #                    spectrum, left=0, right=0)
+        # Added by PJW
+        vac_redshifted_wavs = air_to_vac(redshifted_wavs)
 
-        vac_redshifted_wavs = self.air_to_vac(redshifted_wavs)
-        # fluxes = spectres.spectres(
-        #     self.spec_wavs, vac_redshifted_wavs, spectrum, fill=0
-        # )
         fluxes = interp_conserve_c(self.spec_wavs, vac_redshifted_wavs, spectrum)
 
         if self.spec_units == "mujy":
@@ -819,32 +794,35 @@ class ExtendedModelGalaxy(BagpipesModelGalaxy):
 
         self.spectrum = np.c_[self.spec_wavs, fluxes]
 
-    @staticmethod
-    def air_to_vac(wavelength: ArrayLike):
-        """
-        Convert air to vacuum wavelengths.
 
-        Implements the air to vacuum wavelength conversion described in eqn 65 of
-        Griesen 2006.
-
-        TODO: check against most recent specutils conversions.
-
-        Parameters
-        ----------
-        wavelength : ArrayLike
-            The wavelengths in Angstroms.
-        """
-        # wlum = wavelength.to(u.um).value
-        wlum = wavelength[wavelength >= 2e4] / 1e4
-        wavelength[wavelength >= 2e4] = (
-            1 + 1e-6 * (287.6155 + 1.62887 / wlum**2 + 0.01360 / wlum**4)
-        ) * wavelength[wavelength >= 2e4]
-        return wavelength
-
-
-class BagpipesSampler(object):
+def air_to_vac(wavelength: ArrayLike) -> ArrayLike:
     """
-    Bagpipes model galaxy sampler.
+    Convert air to vacuum wavelengths.
+
+    Implements the air to vacuum wavelength conversion described in eqn 65 of
+    Griesen 2006.
+
+    TODO: check against most recent specutils conversions.
+
+    Parameters
+    ----------
+    wavelength : ArrayLike
+        The wavelengths in Angstroms.
+    """
+
+    sigma2 = (1 / (wavelength / 1e4)) ** 2
+
+    refr = 1 + 1e-6 * (287.6155 + 1.62887 * sigma2 + 0.01360 * sigma2**2)
+
+    # Only convert above 2000A
+    wavelength[wavelength > 2e3] *= refr[wavelength > 2e3]
+
+    return wavelength
+
+
+class BagpipesSpecGenerator(object):
+    """
+    Class for generating spectra using bagpipes model galaxies.
 
     Parameters
     ----------
@@ -856,16 +834,21 @@ class BagpipesSampler(object):
         ``veldisp=500``.
     """
 
-    def __init__(self, fit_instructions: dict, veldisp: float = 500.0):
+    def __init__(
+        self,
+        fit_instructions: dict,
+        veldisp: float = 500.0,
+        spec_wavs: np.ndarray = np.arange(1e4, 2.3e4, 22.5),
+    ):
 
         self.fit_instructions = deepcopy(fit_instructions)
         self.model_components = deepcopy(fit_instructions)
         self.model_components["veldisp"] = veldisp
 
-        # self._set_constants()
         self._process_fit_instructions()
         self.model_gal = None
-        # print (fit_instructions)
+
+        self.spec_wavs = spec_wavs
 
     def _process_fit_instructions(self) -> None:
         """
@@ -1014,7 +997,7 @@ class BagpipesSampler(object):
         param_vector: ArrayLike,
         cont_only: bool = False,
         rm_line: list[str] | str | None = None,
-        return_line_flux: bool = False,
+        return_line_fluxes: bool = False,
         **model_kwargs,
     ) -> ArrayLike:
         """
@@ -1050,24 +1033,23 @@ class BagpipesSampler(object):
         new_comps = self.update_model_components(param_vector)
 
         if self.model_gal is None:
-            self.model_gal = ExtendedModelGalaxy(new_comps, **model_kwargs)
+            self.model_gal = ExtendedModelGalaxy(
+                new_comps, spec_wavs=self.spec_wavs, **model_kwargs
+            )
 
         self.model_gal.update(new_comps, cont_only=cont_only, rm_line=rm_line)
 
-        if return_line_flux:
-            line_flux = 0.0
-            if rm_line is not None:
-                rm_line = np.atleast_1d(rm_line).ravel()
-                for rm in rm_line:
-                    line_flux += self.model_gal.line_fluxes[rm]
-            return self.model_gal.spectrum.T, line_flux
+        if return_line_fluxes:
+            return self.model_gal.spectrum[:, 1], self.model_gal.line_fluxes
         else:
             return self.model_gal.spectrum.T
 
 
-def _init_spec_sampler(fit_instructions, veldisp):
-    global spec_sampler
-    spec_sampler = BagpipesSampler(fit_instructions=fit_instructions, veldisp=veldisp)
+# def init_bagpipes_spec_gen(fit_instructions, veldisp, spec_wavs):
+#     global spec_generator
+#     spec_generator = BagpipesSpecGenerator(
+#         fit_instructions=fit_instructions, veldisp=veldisp, spec_wavs=spec_wavs
+#     )
 
 
 def create_spec_file(
@@ -1075,6 +1057,7 @@ def create_spec_file(
     posterior_dir: Path | None = None,
     spec_dir: Path | None = None,
     spec_wavs: ArrayLike | None = None,
+    spec_cache: dict | None = None,
 ) -> None:
     """
     Generated resampled spectra from a bagpipes posterior output.
@@ -1109,10 +1092,12 @@ def create_spec_file(
             spec_data = np.zeros((unique_vectors.shape[0], spec_wavs.shape[0]))
 
             for s_i, param_vector in enumerate(unique_vectors):
-                spec_data[s_i] = spec_sampler.sample(
-                    param_vector,
-                    spec_wavs=spec_wavs,
-                )[1]
+                if not repr(param_vector) in spec_cache.keys():
+                    spec_cache[repr(param_vector)] = spec_generator.sample(
+                        param_vector,
+                        spec_wavs=spec_wavs,
+                    )[1]
+                spec_data[s_i] = spec_cache[repr(param_vector)]
 
             spec_file.create_dataset("spec_data", data=spec_data[unique_inv])
 
@@ -1168,26 +1153,101 @@ def pre_gen_spec(
     def _update(*a):
         pbar.update()
 
-    with Pool(
-        processes=cpu_count,
-        initializer=_init_spec_sampler,
-        initargs=(
-            fit_instructions,
-            veldisp,
-        ),
-    ) as pool:
-        for p_i, p in enumerate(post_ids):
-            pool.apply_async(
-                create_spec_file,
-                (p,),
-                kwds=dict(
-                    posterior_dir=posterior_dir,
-                    spec_dir=spec_dir,
-                    spec_wavs=spec_wavs,
-                ),
-                error_callback=print,
-                callback=_update,
+    with Manager() as manager:
+
+        spec_cache = manager.dict()
+
+        with Pool(
+            processes=cpu_count,
+            initializer=init_bagpipes_spec_gen,
+            initargs=(
+                fit_instructions,
+                veldisp,
+            ),
+        ) as pool:
+            for p_i, p in enumerate(post_ids[:48]):
+                pool.apply_async(
+                    create_spec_file,
+                    (p,),
+                    kwds=dict(
+                        posterior_dir=posterior_dir,
+                        spec_dir=spec_dir,
+                        spec_wavs=spec_wavs,
+                        spec_cache=spec_cache,
+                    ),
+                    error_callback=print,
+                    callback=_update,
+                )
+            pool.close()
+            pool.join()
+            pbar.close()
+
+        # print (spec_cache)
+        print(len(list(spec_cache.keys())))
+        print(len(list(spec_cache.keys())) / 48)
+        exit()
+
+
+def resample_pipes(temp_IDs: list[str], spec_wavs: ArrayLike) -> tuple:
+
+    temps_resampled = np.zeros((len(temp_IDs), spec_wavs.shape[0]))
+
+    seg_ids = []
+
+    if spectral_dir is not None:
+
+        temps_resampled = np.zeros(
+            (len(rows) + len(id_shifts) * n_shifted_rows, spec_wavs.shape[0])
+        )
+        with h5py.File(
+            Path(spectral_dir) / f"{seg_id}.h5",
+            "r",
+        ) as spec_file:
+            temps_resampled[: len(rows), :] = np.array(spec_file["spec_data"])[rows]
+
+        # Just make one set of templates from all possible seg ids
+        if (id_shifts is not None) and (len(id_shifts) > 0):
+            for s_i, s in enumerate(id_shifts):
+                shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
+                with h5py.File(
+                    Path(spectral_dir) / f"{shifted_id}.h5",
+                    "r",
+                ) as spec_file:
+                    temps_resampled[
+                        int(len(rows) + s_i * n_shifted_rows) : int(
+                            len(rows) + (s_i + 1) * n_shifted_rows
+                        ) :
+                    ] = np.array(spec_file["spec_data"])[rows[:n_shifted_rows]]
+
+    else:
+        with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
+            samples2d = np.zeros(
+                (
+                    len(rows) + len(id_shifts) * n_shifted_rows,
+                    post_file["samples2d"].shape[1],
+                )
             )
-        pool.close()
-        pool.join()
-        pbar.close()
+            samples2d[: len(rows), :] = np.array(post_file["samples2d"])[rows]
+
+        # Just make one set of posterior samples from all possible seg ids
+        if (id_shifts is not None) and (len(id_shifts) > 0):
+            for s_i, s in enumerate(id_shifts):
+                shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
+                with h5py.File(
+                    Path(posterior_dir) / f"{shifted_id}.h5", "r"
+                ) as post_file:
+                    samples2d[
+                        int(len(rows) + s_i * n_shifted_rows) : int(
+                            len(rows) + (s_i + 1) * n_shifted_rows
+                        ) :
+                    ] = np.array(post_file["samples2d"])[rows[:n_shifted_rows]]
+
+        temps_resampled = np.zeros((samples2d.shape[0], spec_wavs.shape[0]))
+        for sample_i, sample in enumerate(samples2d):
+
+            temps_resampled[sample_i] = pipes_sampler.sample(
+                sample,
+                spec_wavs=spec_wavs,
+                cont_only=cont_only,
+                rm_line=rm_line,
+            )[1]

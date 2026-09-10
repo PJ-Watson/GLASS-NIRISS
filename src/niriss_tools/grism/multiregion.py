@@ -242,7 +242,7 @@ class MultiRegionFit:
             "bad_pa_threshold": config["grism"].get("bad_pa_threshold", 1.6),
             "spec_wavs": config["grism"].get("spec_wavs", None),
             "oversamp_factor": config["grism"].get("oversamp_factor", 1),
-            "veldisp": config["grism"].get("veldisp", 500),
+            "veldisp": config["grism"].get("veldisp", 50),
             "out_dir": config["grism"].get("out_dir", "multiregion"),
             "temp_dir": config["grism"].get("temp_dir", None),
             "memmap": config["grism"].get("memmap", False),
@@ -258,7 +258,7 @@ class MultiRegionFit:
             "nnls_tol": config["grism"].get("nnls_tol", 1e-5),
             "n_shifted": config["grism"].get("n_shifted", 2),
             "n_shifted_samples": config["grism"].get("n_shifted_samples", 1),
-            "cache_spec": config["grism"].get("cache_spec", True),
+            "cache_spec": config["grism"].get("cache_spec", False),
         }
 
     def fit_atlas(
@@ -648,10 +648,10 @@ class MultiRegionFit:
         temp_offset=None,
         cont_only=False,
         rm_line=None,
-        rows=None,
+        model_seeds=None,
         memmap: bool = False,
         id_shifts=None,
-        n_shifted_rows=None,
+        n_shifted_model_seeds=None,
     ):
         seg_id = int(seg_id)
 
@@ -677,15 +677,18 @@ class MultiRegionFit:
             if spectral_dir is not None:
 
                 temps_resampled = np.zeros(
-                    (len(rows) + len(id_shifts) * n_shifted_rows, spec_wavs.shape[0])
+                    (
+                        len(model_seeds) + len(id_shifts) * n_shifted_model_seeds,
+                        spec_wavs.shape[0],
+                    )
                 )
                 with h5py.File(
                     Path(spectral_dir) / f"{seg_id}.h5",
                     "r",
                 ) as spec_file:
-                    temps_resampled[: len(rows), :] = np.array(spec_file["spec_data"])[
-                        rows
-                    ]
+                    temps_resampled[: len(model_seeds), :] = np.array(
+                        spec_file["spec_data"]
+                    )[model_seeds]
 
                 # Just make one set of templates from all possible seg ids
                 if (id_shifts is not None) and (len(id_shifts) > 0):
@@ -696,20 +699,26 @@ class MultiRegionFit:
                             "r",
                         ) as spec_file:
                             temps_resampled[
-                                int(len(rows) + s_i * n_shifted_rows) : int(
-                                    len(rows) + (s_i + 1) * n_shifted_rows
+                                int(
+                                    len(model_seeds) + s_i * n_shifted_model_seeds
+                                ) : int(
+                                    len(model_seeds) + (s_i + 1) * n_shifted_model_seeds
                                 ) :
-                            ] = np.array(spec_file["spec_data"])[rows[:n_shifted_rows]]
+                            ] = np.array(spec_file["spec_data"])[
+                                model_seeds[:n_shifted_model_seeds]
+                            ]
 
             else:
                 with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
                     samples2d = np.zeros(
                         (
-                            len(rows) + len(id_shifts) * n_shifted_rows,
+                            len(model_seeds) + len(id_shifts) * n_shifted_model_seeds,
                             post_file["samples2d"].shape[1],
                         )
                     )
-                    samples2d[: len(rows), :] = np.array(post_file["samples2d"])[rows]
+                    samples2d[: len(model_seeds), :] = np.array(post_file["samples2d"])[
+                        model_seeds
+                    ]
 
                 # Just make one set of posterior samples from all possible seg ids
                 if (id_shifts is not None) and (len(id_shifts) > 0):
@@ -719,10 +728,14 @@ class MultiRegionFit:
                             Path(posterior_dir) / f"{shifted_id}.h5", "r"
                         ) as post_file:
                             samples2d[
-                                int(len(rows) + s_i * n_shifted_rows) : int(
-                                    len(rows) + (s_i + 1) * n_shifted_rows
+                                int(
+                                    len(model_seeds) + s_i * n_shifted_model_seeds
+                                ) : int(
+                                    len(model_seeds) + (s_i + 1) * n_shifted_model_seeds
                                 ) :
-                            ] = np.array(post_file["samples2d"])[rows[:n_shifted_rows]]
+                            ] = np.array(post_file["samples2d"])[
+                                model_seeds[:n_shifted_model_seeds]
+                            ]
 
                 temps_resampled = np.zeros((samples2d.shape[0], spec_wavs.shape[0]))
                 for sample_i, sample in enumerate(samples2d):
@@ -786,11 +799,11 @@ class MultiRegionFit:
         beam_info=None,
         cont_only=False,
         rm_line=None,
-        rows=None,
+        model_seeds=None,
         coeffs=None,
         memmap: bool = False,
         id_shifts=None,
-        n_shifted_rows=None,
+        n_shifted_model_seeds=None,
         return_line_flux=False,
     ):
         seg_id = int(seg_id)
@@ -817,11 +830,13 @@ class MultiRegionFit:
             with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
                 samples2d = np.zeros(
                     (
-                        len(rows) + len(id_shifts) * n_shifted_rows,
+                        len(model_seeds) + len(id_shifts) * n_shifted_model_seeds,
                         post_file["samples2d"].shape[1],
                     )
                 )
-                samples2d[: len(rows), :] = np.array(post_file["samples2d"])[rows]
+                samples2d[: len(model_seeds), :] = np.array(post_file["samples2d"])[
+                    model_seeds
+                ]
 
             # Just make one set of posterior samples from all possible seg ids
             if (id_shifts is not None) and (len(id_shifts) > 0):
@@ -831,10 +846,12 @@ class MultiRegionFit:
                         Path(posterior_dir) / f"{shifted_id}.h5", "r"
                     ) as post_file:
                         samples2d[
-                            int(len(rows) + s_i * n_shifted_rows) : int(
-                                len(rows) + (s_i + 1) * n_shifted_rows
+                            int(len(model_seeds) + s_i * n_shifted_model_seeds) : int(
+                                len(model_seeds) + (s_i + 1) * n_shifted_model_seeds
                             ) :
-                        ] = np.array(post_file["samples2d"])[rows[:n_shifted_rows]]
+                        ] = np.array(post_file["samples2d"])[
+                            model_seeds[:n_shifted_model_seeds]
+                        ]
 
             if return_line_flux:
                 line_fluxes = np.zeros(len(samples2d))
@@ -935,7 +952,7 @@ class MultiRegionFit:
         bad_pa_threshold: float | None = 1.6,
         spec_wavs: ArrayLike | None = None,
         oversamp_factor: int = 1,
-        veldisp: float = 500,
+        veldisp: float = 50,
         direct_images: None = None,
         out_dir: PathLike | None = None,
         temp_dir: PathLike | None = None,
@@ -952,7 +969,7 @@ class MultiRegionFit:
         nnls_tol: float = 1e-5,
         n_shifted: int = 2,
         n_shifted_samples: int = 1,
-        cache_spec: bool = True,
+        cache_spec: bool = False,
     ):
         """
         Fit the object at a specified redshift.
@@ -1077,14 +1094,18 @@ class MultiRegionFit:
             Exact form of return still WIP.
         """
 
-        try:
-            import adelie
+        if nnls_method == "adelie":
+            try:
+                # Reset core binding, interferes with python process affinity
+                os.environ["OMP_PROC_BIND"] = "FALSE"
 
-            print("Using `adelie` solver.")
+                import adelie
 
-            HAS_ADELIE = True
-        except:
-            HAS_ADELIE = False
+                print("Using `adelie` solver.")
+
+                HAS_ADELIE = True
+            except:
+                HAS_ADELIE = False
 
         nnls_iters = np.atleast_1d(nnls_iters).astype(int)
         nnls_tol = np.atleast_1d(nnls_tol)
@@ -1127,20 +1148,14 @@ class MultiRegionFit:
             self.fit_bg = False
             A = self.MB.A_poly * 1
 
-        with h5py.File(
-            self.pipes_dir
-            / "posterior"
-            / self.run_name
-            / f"{int(self.regions_phot_cat["bin_id"][0])}.h5",
-            "r",
-        ) as test_post:
-
-            fit_info_str = test_post.attrs["fit_instructions"]
-            fit_info_str = fit_info_str.replace("array", "np.array")
-            fit_info_str = fit_info_str.replace("float", "np.float")
-            fit_info_str = fit_info_str.replace("np.np.", "np.")
-            fit_instructions = eval(fit_info_str)
-            n_post_samples = test_post["samples2d"].shape[0]
+        self.template_sampler = BagpipesTemplateSampler(
+            posterior_dir=(self.pipes_dir / "posterior" / self.run_name),
+            seed=seed,
+            cpu_count=cpu_count,
+            cache_all_spectra=cache_spec,
+            veldisp=veldisp,
+            spec_wavs=spec_wavs,
+        )
 
         # Try to allow for both memory and file-backed multiprocessing of
         # large arrays
@@ -1148,71 +1163,8 @@ class MultiRegionFit:
         smm = SharedMemoryManager()
         smm.start()
 
-        # If we are not oversampling, we can drastically reduce the memory usage
-        # and only store the reprojected (multiregion) seg map for each beam.
-        # If the segmentation map is not aligned to the beam direct images, and
-        # we are oversampling to find the exact pixel overlap, the fastest
-        # method for generating forward-modelled spectra is to pre-calculate
-        # the segmentation map overlap for each region, and store this in a
-        # shared memory array.
-        if oversamp_factor == 1:
-            oversamp_seg_maps_shape = (
-                self.MB.N,
-                self.MB.beams[0].beam.sh[0],
-                self.MB.beams[0].beam.sh[1],
-            )
-        else:
-            oversamp_seg_maps_shape = (
-                self.n_regions,
-                self.MB.N,
-                self.MB.beams[0].beam.sh[0],
-                self.MB.beams[0].beam.sh[1],
-            )
-
-        if memmap:
-            oversamp_seg_maps = np.memmap(
-                temp_dir / "memmap_oversamp_seg_maps.dat",
-                dtype=float_dtype,
-                mode="w+",
-                shape=oversamp_seg_maps_shape,
-            )
-        else:
-            shm_seg_maps = smm.SharedMemory(
-                size=np.dtype(float_dtype).itemsize * np.prod(oversamp_seg_maps_shape)
-            )
-            oversamp_seg_maps = np.ndarray(
-                oversamp_seg_maps_shape,
-                dtype=float_dtype,
-                buffer=shm_seg_maps.buf,
-            )
-
-        oversamp_seg_maps.fill(0.0)
-
         beam_info = {}
         start_idx = 0
-
-        oversampled_shape = (
-            oversamp_factor * self.MB.beams[0].beam.sh[0],
-            oversamp_factor * self.MB.beams[0].beam.sh[1],
-        )
-
-        if memmap:
-            oversampled = np.memmap(
-                temp_dir / "memmap_oversampled.dat",
-                dtype=float_dtype,
-                mode="w+",
-                shape=oversampled_shape,
-            )
-        else:
-            shm_oversampled = smm.SharedMemory(
-                size=np.dtype(float_dtype).itemsize * np.prod(oversampled_shape)
-            )
-            oversampled = np.ndarray(
-                oversampled_shape,
-                dtype=float_dtype,
-                buffer=shm_oversampled.buf,
-            )
-        oversampled.fill(np.nan)
 
         start_idx = 0
         for i, (beam_cutout, cutout_shape) in enumerate(
@@ -1230,57 +1182,72 @@ class MultiRegionFit:
             )
             start_idx += cutout_shape
 
-            beam_wcs = deepcopy(beam_cutout.direct.wcs)
-            beam_wcs = grizli_utils.transform_wcs(beam_wcs, scale=oversamp_factor)
+        #     beam_wcs = deepcopy(beam_cutout.direct.wcs)
+        #     beam_wcs = grizli_utils.transform_wcs(beam_wcs, scale=oversamp_factor)
 
-            oversampled[:] = reproject_interp(
+        #     oversampled[:] = reproject_interp(
+        #         (self.regions_seg_map, self.regions_seg_wcs),
+        #         beam_wcs,
+        #         oversampled_shape,
+        #         return_footprint=False,
+        #         order=0,
+        #     )
+
+        #     if oversamp_factor == 1:
+        #         oversamp_seg_maps[i] = oversampled
+        #         continue
+
+        #     with Pool(processes=cpu_count) as pool:
+        #         multi_fn = partial(
+        #             self._reduce_seg_map,
+        #             shared_input=(
+        #                 temp_dir / "memmap_oversampled.dat"
+        #                 if memmap
+        #                 else shm_oversampled.name
+        #             ),
+        #             init_shape=oversampled_shape,
+        #             shared_output=(
+        #                 temp_dir / "memmap_oversamp_seg_maps.dat"
+        #                 if memmap
+        #                 else shm_seg_maps.name
+        #             ),
+        #             output_shape=oversamp_seg_maps_shape,
+        #             beam_idx=i,
+        #             oversamp_factor=oversamp_factor,
+        #             memmap=memmap,
+        #         )
+        #         pool.starmap(multi_fn, enumerate(self.regions_seg_ids))
+
+        # # Avoid any nan-related problems later
+        # oversamp_seg_maps[~np.isfinite(oversamp_seg_maps)] = 0
+
+        for ib, beam in enumerate(self.MB.beams):
+            repr_seg_map = reproject_interp(
                 (self.regions_seg_map, self.regions_seg_wcs),
-                beam_wcs,
-                oversampled_shape,
+                beam.direct.wcs,
+                beam.beam.sh,
                 return_footprint=False,
                 order=0,
             )
-
-            if oversamp_factor == 1:
-                oversamp_seg_maps[i] = oversampled
-                continue
-
-            with Pool(processes=cpu_count) as pool:
-                multi_fn = partial(
-                    self._reduce_seg_map,
-                    shared_input=(
-                        temp_dir / "memmap_oversampled.dat"
-                        if memmap
-                        else shm_oversampled.name
-                    ),
-                    init_shape=oversampled_shape,
-                    shared_output=(
-                        temp_dir / "memmap_oversamp_seg_maps.dat"
-                        if memmap
-                        else shm_seg_maps.name
-                    ),
-                    output_shape=oversamp_seg_maps_shape,
-                    beam_idx=i,
-                    oversamp_factor=oversamp_factor,
-                    memmap=memmap,
-                )
-                pool.starmap(multi_fn, enumerate(self.regions_seg_ids))
-
-        # Avoid any nan-related problems later
-        oversamp_seg_maps[~np.isfinite(oversamp_seg_maps)] = 0
+            repr_seg_map[~np.isfinite(repr_seg_map)] = 0
+            self.MB.beams[ib].regions_seg_map = repr_seg_map
 
         # The total number of templates
         NTEMP = self.n_regions * n_samples
         if n_shifted > 0:
             NTEMP += self.n_regions * n_shifted * n_shifted_samples
-        num_stacks = len([*beam_info.keys()])
-        stacked_shape = np.nansum([np.prod(v["2d_shape"]) for v in beam_info.values()])
-        temp_offset = A.shape[0] - self.MB.N + num_stacks
+        # num_stacks = len([*beam_info.keys()])
+        # stacked_shape = np.nansum([np.prod(v["2d_shape"]) for v in beam_info.values()])
+        # temp_offset = A.shape[0] - self.MB.N + num_stacks
+
+        # num_stacks = len([*beam_info.keys()])
+        # stacked_shape = np.nansum([np.prod(v["2d_shape"]) for v in beam_info.values()])
+        temp_offset = A.shape[0]  # - self.MB.N + num_stacks
 
         # This is the large array of models. Each row corresponds to a
         # (probably) unique template, forward-modelled across all beams,
         # and flattened.
-        stacked_A_shape = (temp_offset + NTEMP, stacked_shape)
+        stacked_A_shape = (temp_offset + NTEMP, self.MB.Ntot)
 
         print(f"{memmap=}\n\n")
 
@@ -1307,29 +1274,29 @@ class MultiRegionFit:
         # individual beams for fitting. The computational requirements are
         # already considerable, and for GLASS-JWST, not stacking would mean ~6x
         # more memory, and at least that in computation time.
-        stacked_scif = np.zeros(stacked_shape)
-        stacked_ivarf = np.zeros(stacked_shape)
-        stacked_weightf = np.zeros(stacked_shape)
-        stacked_fit_mask = np.zeros(stacked_shape, dtype=bool)
+        # stacked_scif = np.zeros(stacked_shape)
+        # stacked_ivarf = np.zeros(stacked_shape)
+        # stacked_weightf = np.zeros(stacked_shape)
+        # stacked_fit_mask = np.zeros(stacked_shape, dtype=bool)
 
         start_idx = 0
         for k_i, (k, v) in enumerate(beam_info.items()):
             stack_idxs = np.r_["0,2", *v["flat_slice"]]
 
-            stacked_scif[start_idx : start_idx + np.prod(v["2d_shape"])] = np.nanmedian(
-                self.MB.scif[stack_idxs],
-                axis=0,
-            )
-            stacked_weightf[start_idx : start_idx + np.prod(v["2d_shape"])] = (
-                np.nanmedian(
-                    self.MB.weightf[stack_idxs],
-                    axis=0,
-                )
-            )
-            stacked_fit_mask[start_idx : start_idx + np.prod(v["2d_shape"])] = np.any(
-                self.MB.fit_mask[stack_idxs],
-                axis=0,
-            )
+            # stacked_scif[start_idx : start_idx + np.prod(v["2d_shape"])] = np.nanmedian(
+            #     self.MB.scif[stack_idxs],
+            #     axis=0,
+            # )
+            # stacked_weightf[start_idx : start_idx + np.prod(v["2d_shape"])] = (
+            #     np.nanmedian(
+            #         self.MB.weightf[stack_idxs],
+            #         axis=0,
+            #     )
+            # )
+            # stacked_fit_mask[start_idx : start_idx + np.prod(v["2d_shape"])] = np.any(
+            #     self.MB.fit_mask[stack_idxs],
+            #     axis=0,
+            # )
             if fit_background:
                 stacked_A[k_i, start_idx : start_idx + np.prod(v["2d_shape"])] = 1.0
                 stacked_A[
@@ -1342,14 +1309,14 @@ class MultiRegionFit:
                     start_idx : start_idx + np.prod(v["2d_shape"]),
                 ] = np.nanmean(self.MB.A_poly[:, stack_idxs], axis=1)
 
-            stacked_ivarf[start_idx : start_idx + np.prod(v["2d_shape"])] = (
-                np.nanmedian(self.MB.ivarf[stack_idxs], axis=0)
-            )
+            # stacked_ivarf[start_idx : start_idx + np.prod(v["2d_shape"])] = (
+            #     np.nanmedian(self.MB.ivarf[stack_idxs], axis=0)
+            # )
 
             start_idx += np.prod(v["2d_shape"])
 
-        stacked_fit_mask &= np.isfinite(stacked_scif)
-        DoF = int((stacked_weightf * stacked_fit_mask).sum())
+        # stacked_fit_mask &= np.isfinite(self.MB.scif)
+        # DoF = int((self.MB.weightf * stacked_fit_mask).sum())
 
         # Allow for background fitting by including an offset
         if fit_background:
@@ -1357,12 +1324,12 @@ class MultiRegionFit:
         else:
             pedestal = 0.0
 
-        y = stacked_scif[stacked_fit_mask] + pedestal
-        y *= np.sqrt(stacked_ivarf[stacked_fit_mask])
+        y = self.MB.scif[self.MB.fit_mask] + pedestal
+        y *= self.MB.sivarf[self.MB.fit_mask]
 
         y = y.astype(float_dtype)
 
-        stacked_sivarf_masked = np.sqrt(stacked_ivarf[stacked_fit_mask])
+        sivarf_masked = self.MB.sivarf[self.MB.fit_mask]
 
         # TODO: make the output name a parameter?
         self.output_table_path = multireg_out_dir / (
@@ -1370,55 +1337,37 @@ class MultiRegionFit:
             f"bins_{n_iters}iters_{n_samples}samples_z_{z}_sig_{veldisp}.ecsv"
         )
 
-        # The function to produce the templates - only a couple of
-        # parameters change on each iteration.
-        stacked_fn = partial(
-            self._gen_stacked_templates_from_pipes,
-            shared_seg_name=(
-                temp_dir / "memmap_oversamp_seg_maps.dat"
-                if memmap
-                else shm_seg_maps.name
-            ),
-            seg_maps_shape=oversamp_seg_maps_shape,
-            shared_models_name=(
-                temp_dir / "memmap_stacked_A.dat" if memmap else shm_stacked_A.name
-            ),
-            models_shape=stacked_A_shape,
-            posterior_dir=str(self.pipes_dir / "posterior" / self.run_name),
-            n_samples=n_samples + (n_shifted * n_shifted_samples),
-            spec_wavs=spec_wavs,
-            beam_info=beam_info,
-            temp_offset=temp_offset,
-            cont_only=False,
-            rm_line=None,
-            memmap=memmap,
-            n_shifted_rows=n_shifted_samples,
-        )
+        # # The function to produce the templates - only a couple of
+        # # parameters change on each iteration.
+        # stacked_fn = partial(
+        #     self._gen_stacked_templates_from_pipes,
+        #     shared_seg_name=(
+        #         temp_dir / "memmap_oversamp_seg_maps.dat"
+        #         if memmap
+        #         else shm_seg_maps.name
+        #     ),
+        #     seg_maps_shape=oversamp_seg_maps_shape,
+        #     shared_models_name=(
+        #         temp_dir / "memmap_stacked_A.dat" if memmap else shm_stacked_A.name
+        #     ),
+        #     models_shape=stacked_A_shape,
+        #     posterior_dir=str(self.pipes_dir / "posterior" / self.run_name),
+        #     n_samples=n_samples + (n_shifted * n_shifted_samples),
+        #     spec_wavs=spec_wavs,
+        #     beam_info=beam_info,
+        #     temp_offset=temp_offset,
+        #     cont_only=False,
+        #     rm_line=None,
+        #     memmap=memmap,
+        #     n_shifted_model_seeds=n_shifted_samples,
+        # )
 
-        if cache_spec:
-            pre_gen_spec(
-                self.pipes_dir,
-                fit_instructions,
-                spec_wavs=spec_wavs,
-                veldisp=veldisp,
-                run=self.run_name,
-                cpu_count=cpu_count,
-            )
-            pool_kwargs = dict(
-                processes=cpu_count,
-                initializer=_init_beams,
-                initargs=(self.MB.beams,),
-            )
-        else:
-            pool_kwargs = dict(
-                processes=cpu_count,
-                initializer=_init_pipes_sampler,
-                initargs=(
-                    fit_instructions,
-                    veldisp,
-                    self.MB.beams,
-                ),
-            )
+        fwd_model_fn = partial(
+            forward_model_independent,
+            spec_wavs=spec_wavs,
+            temp_offset=temp_offset,
+            memmap=memmap,
+        )
 
         # These column names should be fixed for all objects
         init_col_names = [
@@ -1427,7 +1376,7 @@ class MultiRegionFit:
             "max_nnls_iters",
             "solve_nnls_iters",
             "nnls_tol",
-            "rows",
+            "model_seeds",
             "id_shifts",
             "n_shifted_samples",
             "fitting_time",
@@ -1477,30 +1426,53 @@ class MultiRegionFit:
         output_table.meta["Z"] = (z, "Best-fit redshift")
         output_table.meta["DOF"] = (DoF, "Degrees of freedom (active pixels)")
 
-        # Two RNG, so can compare with and without extra shift samples
-        rng = np.random.default_rng(seed=seed)
-        rng_shifts = np.random.default_rng(seed=seed)
-
         # Check if the table length matches the expected number of iterations
         n_prev_iters = np.max(
             (output_table["iteration"] + 1)[np.isfinite(output_table["chi2"])],
             initial=0,
         )
-        if n_prev_iters < total_iters:
 
-            # If there are previous iterations, sample from the RNGs so the
-            # seed order is preserved
-            for x in np.arange(n_prev_iters):
-                rows = rng.choice(
-                    np.arange(n_post_samples, dtype=int),
-                    size=n_samples,
-                    replace=False,
-                )
-                id_shifts = rng_shifts.choice(
-                    np.arange(self.n_regions, dtype=int),
-                    size=n_shifted,
-                    replace=False if n_shifted <= self.n_regions else True,
-                )
+        # # Perform an initial model generation to setup the shared arrays,
+        # # before creating the pool
+        # _seeds, _shifts = self.template_sampler.gen_model_seeds_from_iter(
+        #     -1, n_samples, n_shifted
+        # )
+
+        # shm_model_spectra_name, model_spectra_arr_shape = (
+        #     self.template_sampler.gen_all_spectra_from_seeds(
+        #         model_seeds=_seeds,
+        #         extra_region_idxs=_shifts,
+        #         n_extra_samples=n_shifted_samples,
+        #         shared_memory_manger=smm,
+        #     )
+        # )
+
+        # Initialise the shared memory for the sampled spectra
+        model_spectra_arr_shape = (
+            len(self.regions_seg_ids),
+            n_samples + n_shifted * n_shifted_samples,
+            len(spec_wavs),
+        )
+        shm_model_spectra = smm.SharedMemory(
+            size=np.dtype(float_dtype).itemsize * np.prod(model_spectra_arr_shape),
+        )
+        model_spectra_arr = np.ndarray(
+            model_spectra_arr_shape,
+            dtype=float_dtype,
+            buffer=shm_model_spectra.buf,
+        )
+        shm_model_spectra_name = shm_model_spectra.name
+
+        # Ensure the array is blank on first run
+        model_spectra_arr.fill(0.0)
+
+        model_spectra_arr_record = {}
+
+        copy_y = deepcopy(y)
+
+        print(f"\n{n_prev_iters}, {total_iters}\n")
+
+        if n_prev_iters < total_iters:
 
             remaining_iters = total_iters - n_prev_iters
 
@@ -1510,197 +1482,266 @@ class MultiRegionFit:
 
             iterations = np.arange(n_prev_iters, total_iters)
 
-            for iteration in iterations:
-                try:
-                    curr_line = (
-                        f"Minimum chi2: {np.nanmin(output_table["chi2"]):.3f}"
-                        f"\t\t(Iteration {np.nanargmin(output_table["chi2"])})"
-                    )
-                except:
-                    curr_line = "Minimum chi2: ---"
-                log_with_offset("", curr_line=curr_line)
+            with multiprocessing.Pool(
+                processes=cpu_count,
+                initializer=init_forward_model,
+                initargs=(
+                    shm_model_spectra_name,
+                    model_spectra_arr_shape,
+                    shm_stacked_A.name,
+                    stacked_A_shape,
+                    self.MB,
+                ),
+            ) as forward_model_pool:
 
-                # On the final iteration, reuse the samples from the current
-                # best-fit solution
-                if TWO_STAGE and (iteration == iterations[-1]):
-
-                    best_iter = np.nanargmin(output_table["chi2"])
-
-                    rows = [int(s) for s in output_table["rows"][best_iter]]
-                    id_shifts = [int(s) for s in output_table["id_shifts"][best_iter]]
-                else:
-                    rows = rng.choice(
-                        np.arange(n_post_samples, dtype=int),
-                        size=n_samples,
-                        replace=False,
-                    )
-                    id_shifts = rng_shifts.choice(
-                        np.arange(self.n_regions, dtype=int),
-                        size=n_shifted,
-                        replace=False if n_shifted <= self.n_regions else True,
-                    )
-
-                log_with_offset(f"Iteration {iteration}, {rows=}", curr_line=curr_line)
-                t0 = time()
-
-                # Generate the forward-modelled spectra
-                log_with_offset(f"Generating models...", curr_line=curr_line)
-                with multiprocessing.Pool(**pool_kwargs) as pool:
-                    for s_i, s in enumerate(self.regions_seg_ids):
-                        pool.apply_async(
-                            stacked_fn,
-                            (s_i, s),
-                            kwds={
-                                "rows": rows,
-                                "id_shifts": id_shifts,
-                                "spectral_dir": (
-                                    str(self.pipes_dir / "spec" / self.run_name)
-                                    if cache_spec
-                                    else None
-                                ),
-                            },
-                            error_callback=print,
+                for iteration in iterations:
+                    try:
+                        curr_line = (
+                            f"Minimum chi2: {np.nanmin(output_table["chi2"]):.3f}"
+                            f"\t\t(Iteration {np.nanargmin(output_table["chi2"])})"
                         )
-                    pool.close()
-                    pool.join()
+                    except:
+                        curr_line = "Minimum chi2: ---"
+                    log_with_offset("", curr_line=curr_line)
 
-                t1 = time()
-                # print("\r" + f"Generating models... DONE {t1-t0:.3f}s", flush=True)
+                    # On the final iteration, reuse the samples from the current
+                    # best-fit solution
+                    if TWO_STAGE and (iteration == iterations[-1]):
 
-                log_with_offset(
-                    LINE_UP + f"Generating models...    DONE in {t1-t0:.3f}s",
-                    curr_line=curr_line,
-                )
+                        best_iter = np.nanargmin(output_table["chi2"])
 
-                # Remove any negative or zero templates
-                ok_temp = np.sum(stacked_A, axis=1) > 0
+                        model_seeds = np.array(
+                            [int(s) for s in output_table["model_seeds"][best_iter]]
+                        )
+                        id_shifts = np.array(
+                            [int(s) for s in output_table["id_shifts"][best_iter]]
+                        )
+                    else:
+                        model_seeds, id_shifts = (
+                            self.template_sampler.gen_model_seeds_from_iter(
+                                iteration, n_samples, n_shifted
+                            )
+                        )
 
-                # We need to remove duplicate templates so the NNLS solvers can
-                # actually converge. Until such time as np.unique implements
-                # a hash map to allow for speeding up `return_index`, we just
-                # skip over every 199 pixels
-                stacked_A_contig = np.ascontiguousarray(stacked_A[:, ::199])
-                # np.unique() finds identical items in a raveled array. To make it
-                # see each row as a single item, we create a view of each row as a
-                # byte string of length itemsize times number of columns in `ar`
-                ar_row_view = stacked_A_contig.view(
-                    "|S%d" % (stacked_A_contig.itemsize * stacked_A_contig.shape[1])
-                )
-                _, unique_idxs = np.unique(ar_row_view, return_index=True)
-                unique_temp = np.isin(np.arange(stacked_A.shape[0]), unique_idxs)
-                del stacked_A_contig
-
-                # Select only the unique templates
-                ok_temp &= unique_temp
-
-                out_coeffs = np.zeros(stacked_A.shape[0])
-
-                # Transpose the template array
-                stacked_Ax = stacked_A[np.ix_(ok_temp, stacked_fit_mask)].T
-
-                stacked_Ax *= stacked_sivarf_masked[:, np.newaxis]
-
-                # Change the max iters and tolerance for the final iteration
-                if TWO_STAGE and (iteration == iterations[-1]):
-                    log_with_offset("Final iteration", curr_line=curr_line)
-                    _nnls_i = nnls_iters[1]
-                    _nnls_t = nnls_tol[1]
-                else:
-                    _nnls_i = nnls_iters[0]
-                    _nnls_t = nnls_tol[0]
-
-                # print("NNLS fitting...", end="")
-                log_with_offset("NNLS fitting...         ", curr_line=curr_line)
-
-                # Three different methods of fitting, each with different call
-                # signatures and return values
-                if nnls_method == "adelie" and HAS_ADELIE:
-                    state = adelie.solver.bvls(
-                        stacked_Ax,
-                        y,
-                        lower=np.zeros(stacked_Ax.shape[-1], dtype=float_dtype),
-                        upper=np.full(stacked_Ax.shape[-1], np.inf, dtype=float_dtype),
-                        max_iters=_nnls_i,
-                        tol=_nnls_t,
-                        n_threads=1,  # Inter-thread communication is actually slower
+                    log_with_offset(
+                        f"Iteration {iteration}, {model_seeds=}, {id_shifts=}",
+                        curr_line=curr_line,
                     )
-                    state.solve()
-                    state_iters = deepcopy(state.iters)
-                    coeffs = deepcopy(state.beta)
-                    coeffs[:num_stacks] -= pedestal
-                    del state
+                    t0 = time()
 
-                elif nnls_method == "numba":
-
-                    nnls_solver = CDNNLS(stacked_Ax, y)
-                    nnls_solver.run(n_iter=_nnls_i, epsilon=_nnls_t)
-                    coeffs = nnls_solver.w
-                    coeffs[:num_stacks] -= pedestal
-
-                elif nnls_method == "fnnls":
-                    coeffs = fnnls(
-                        stacked_Ax,
-                        y,
-                        tolerance=_nnls_t,
-                        max_iterations=_nnls_i,
+                    shm_model_spectra_name, model_spectra_arr_shape = (
+                        self.template_sampler.gen_all_spectra_from_seeds(
+                            model_seeds=model_seeds,
+                            extra_region_idxs=id_shifts,
+                            n_extra_samples=n_shifted_samples,
+                            shared_memory_manger=smm,
+                            shared_memory_name=shm_model_spectra_name,
+                            shared_memory_shape=model_spectra_arr_shape,
+                        )
                     )
-                    coeffs[:num_stacks] -= pedestal
 
-                elif nnls_method == "fennls":
-                    coeffs = fennls(
-                        stacked_Ax,
-                        y,
-                        tolerance=_nnls_t,
-                        max_iterations=_nnls_i,
+                    # Generate the forward-modelled spectra
+                    log_with_offset(f"Generating models...", curr_line=curr_line)
+
+                    # for s_i, s in enumerate(self.regions_seg_ids[:]):
+                    #     # print(s_i, s)
+                    #     forward_model_pool.apply_async(
+                    #         fwd_model_fn,
+                    #         (s_i, s),
+                    #         error_callback=print,
+                    #     )
+                    forward_model_pool.starmap(
+                        fwd_model_fn, enumerate(self.regions_seg_ids)
                     )
-                    coeffs[:num_stacks] -= pedestal
-                else:
 
-                    coeffs, rnorm, info = scipy.optimize._nnls._nnls(
-                        stacked_Ax, y, _nnls_i
+                    # import matplotlib.pyplot as plt
+                    # plt.imshow(np.log10(stacked_A[:,:]))
+                    # plt.show()
+                    # fwd_model_fn(s_i, s)
+                    # pool.close()
+                    # pool.join()
+                    # with multiprocessing.Pool(**pool_kwargs) as pool:
+                    #     for s_i, s in enumerate(self.regions_seg_ids):
+                    #         pool.apply_async(
+                    #             stacked_fn,
+                    #             (s_i, s),
+                    #             kwds={
+                    #                 "model_seeds": model_seeds,
+                    #                 "id_shifts": id_shifts,
+                    #                 "spectral_dir": (
+                    #                     str(self.pipes_dir / "spec" / self.run_name)
+                    #                     if cache_spec
+                    #                     else None
+                    #                 ),
+                    #             },
+                    #             error_callback=print,
+                    #         )
+                    #     pool.close()
+                    #     pool.join()
+
+                    t1 = time()
+                    # print("\r" + f"Generating models... DONE {t1-t0:.3f}s", flush=True)
+
+                    log_with_offset(
+                        LINE_UP + f"Generating models...    DONE in {t1-t0:.3f}s",
+                        curr_line=curr_line,
                     )
-                    coeffs[:num_stacks] -= pedestal
 
-                t2 = time()
-                log_with_offset(
-                    LINE_UP + f"NNLS fitting...         DONE in {t2-t1:.3f}s",
-                    curr_line=curr_line,
-                )
+                    # Remove any negative or zero templates
+                    ok_temp = np.sum(stacked_A, axis=1) > 0
+                    # print (f"{np.nansum(ok_temp)=}\n\n\n\n")
 
-                out_coeffs[ok_temp] = coeffs
-                stacked_modelf = np.dot(out_coeffs, stacked_A)
-                chi2 = np.nansum(
-                    (
-                        stacked_weightf
-                        * (stacked_scif - stacked_modelf) ** 2
-                        * stacked_ivarf
-                    )[stacked_fit_mask]
-                )
-                output_table[iteration] = [
-                    iteration,
-                    chi2,
-                    _nnls_i,
-                    state_iters if (nnls_method == "adelie" and HAS_ADELIE) else 0,
-                    _nnls_t,
-                    rows,
-                    id_shifts,
-                    n_shifted_samples,
-                    t2 - t1,
-                    time() - t0,
-                    ok_temp.sum(),
-                    *out_coeffs[:temp_offset],
-                    *out_coeffs[temp_offset:].reshape(self.n_regions, -1),
-                ]
+                    # # We need to remove duplicate templates so the NNLS solvers can
+                    # # actually converge. Until such time as np.unique implements
+                    # # a hash map to allow for speeding up `return_index`, we just
+                    # # skip over every 199 pixels
+                    # stacked_A_contig = np.ascontiguousarray(stacked_A[:, ::199])
+                    # # np.unique() finds identical items in a raveled array. To make it
+                    # # see each row as a single item, we create a view of each row as a
+                    # # byte string of length itemsize times number of columns in `ar`
+                    # ar_row_view = stacked_A_contig.view(
+                    #     "|S%d" % (stacked_A_contig.itemsize * stacked_A_contig.shape[1])
+                    # )
+                    # _, unique_idxs = np.unique(ar_row_view, return_index=True)
+                    # # _, unique_idxs = np.unique(stacked_A)
+                    # unique_temp = np.isin(np.arange(stacked_A.shape[0]), unique_idxs)
+                    # del stacked_A_contig
 
-                output_table.write(self.output_table_path, overwrite=True)
-                log_with_offset(
-                    f"Iteration {iteration}: chi2={chi2:.3f}", curr_line=curr_line
-                )
+                    # # Select only the unique templates
+                    # ok_temp &= unique_temp
+                    # print (np.nansum(ok_temp),"\n\n\n\n")
 
-                # Reset the template array
-                stacked_A[temp_offset:].fill(0.0)
+                    out_coeffs = np.zeros(stacked_A.shape[0])
 
-            del stacked_Ax
+                    # Transpose the template array
+                    stacked_Ax = stacked_A[np.ix_(ok_temp, self.MB.fit_mask)].T
+
+                    stacked_Ax *= sivarf_masked[:, np.newaxis]
+
+                    # Change the max iters and tolerance for the final iteration
+                    if TWO_STAGE and (iteration == iterations[-1]):
+                        log_with_offset("Final iteration", curr_line=curr_line)
+                        _nnls_i = nnls_iters[1]
+                        _nnls_t = nnls_tol[1]
+                    else:
+                        _nnls_i = nnls_iters[0]
+                        _nnls_t = nnls_tol[0]
+
+                    # print("NNLS fitting...", end="")
+                    log_with_offset("NNLS fitting...         ", curr_line=curr_line)
+
+                    # Three different methods of fitting, each with different call
+                    # signatures and return values
+                    if nnls_method == "adelie" and HAS_ADELIE:
+
+                        # print (f"\n\n{np.all(copy_y==y)}\n\n")
+                        # copy_Ax = deepcopy(stacked_Ax)
+
+                        # for i in range (5):
+                        state = adelie.solver.bvls(
+                            stacked_Ax,
+                            y,
+                            lower=np.zeros(stacked_Ax.shape[-1], dtype=float_dtype),
+                            upper=np.full(
+                                stacked_Ax.shape[-1], np.inf, dtype=float_dtype
+                            ),
+                            max_iters=_nnls_i,
+                            tol=_nnls_t,
+                            n_threads=cpu_count,
+                        )
+                        state.solve()
+                        state_iters = deepcopy(state.iters)
+                        coeffs = deepcopy(state.beta)
+                        coeffs[: self.MB.N] -= pedestal
+                        del state
+
+                    elif nnls_method == "numba":
+
+                        nnls_solver = CDNNLS(stacked_Ax, y)
+                        nnls_solver.run(n_iter=_nnls_i, epsilon=_nnls_t)
+                        coeffs = nnls_solver.w
+                        coeffs[: self.MB.N] -= pedestal
+
+                    elif nnls_method == "fnnls":
+                        coeffs = fnnls(
+                            stacked_Ax,
+                            y,
+                            tolerance=_nnls_t,
+                            max_iterations=_nnls_i,
+                        )
+                        coeffs[: self.MB.N] -= pedestal
+
+                    elif nnls_method == "fennls":
+                        coeffs = fennls(
+                            stacked_Ax,
+                            y,
+                            tolerance=_nnls_t,
+                            max_iterations=_nnls_i,
+                        )
+                        coeffs[: self.MB.N] -= pedestal
+                    else:
+
+                        coeffs, rnorm, info = scipy.optimize._nnls._nnls(
+                            stacked_Ax, y, _nnls_i
+                        )
+                        coeffs[: self.MB.N] -= pedestal
+
+                    t2 = time()
+                    log_with_offset(
+                        LINE_UP + f"NNLS fitting...         DONE in {t2-t1:.3f}s",
+                        curr_line=curr_line,
+                    )
+
+                    out_coeffs[ok_temp] = coeffs
+                    stacked_modelf = np.dot(out_coeffs, stacked_A)
+                    chi2 = np.nansum(
+                        (
+                            self.MB.weightf
+                            * (self.MB.scif - stacked_modelf) ** 2
+                            * self.MB.ivarf
+                        )[self.MB.fit_mask]
+                    )
+                    output_table[iteration] = [
+                        iteration,
+                        chi2,
+                        _nnls_i,
+                        state_iters if (nnls_method == "adelie" and HAS_ADELIE) else 0,
+                        _nnls_t,
+                        model_seeds,
+                        id_shifts,
+                        n_shifted_samples,
+                        t2 - t1,
+                        time() - t0,
+                        ok_temp.sum(),
+                        *out_coeffs[:temp_offset],
+                        *out_coeffs[temp_offset:].reshape(self.n_regions, -1),
+                    ]
+
+                    output_table.write(self.output_table_path, overwrite=True)
+                    log_with_offset(
+                        f"Iteration {iteration}: chi2={chi2:.3f}", curr_line=curr_line
+                    )
+
+                    model_spectra_arr_record[iteration] = deepcopy(model_spectra_arr)
+
+                    # Reset the template array
+                    stacked_A[temp_offset:].fill(0.0)
+                    model_spectra_arr.fill(0.0)
+
+                del stacked_Ax
+
+        test_iter = np.nanargmin(output_table["chi2"][:-1])
+        print(test_iter)
+        # print (model_spectra_arr_record[test_iter])
+        # print (model_spectra_arr_record[iteration])
+        print(
+            np.all(
+                model_spectra_arr_record[test_iter]
+                == model_spectra_arr_record[iteration]
+            )
+        )
+
+        exit()
 
         # There must be a better way to obtain the coefficients, but
         # slicing tables is not entirely straightforward
@@ -1719,8 +1760,12 @@ class MultiRegionFit:
                 for ib in v["list_idx"]:
                     self.MB.beams[ib].background = out_coeffs[k_i]
 
-        best_rows = [int(s) for s in output_table["rows"][best_iter]]
-        best_id_shifts = [int(s) for s in output_table["id_shifts"][best_iter]]
+        best_model_seeds = np.array(
+            [int(s) for s in output_table["model_seeds"][best_iter]]
+        )
+        best_id_shifts = np.array(
+            [int(s) for s in output_table["id_shifts"][best_iter]]
+        )
 
         # Refill array with best model
         print("Calculating covariance array...")
@@ -1730,7 +1775,7 @@ class MultiRegionFit:
                     stacked_fn,
                     (s_i, s),
                     kwds={
-                        "rows": best_rows,
+                        "model_seeds": best_model_seeds,
                         "id_shifts": best_id_shifts,
                         "spectral_dir": (
                             str(self.pipes_dir / "spec" / self.run_name)
@@ -1743,10 +1788,10 @@ class MultiRegionFit:
             pool.close()
             pool.join()
 
-        stacked_Ax = stacked_A[:, stacked_fit_mask]
+        stacked_Ax = stacked_A[:, self.MB.fit_mask]
         ok_temp = (np.sum(stacked_Ax, axis=1) > 0) & (out_coeffs != 0)
         stacked_Ax = stacked_Ax[ok_temp, :].T * 1
-        stacked_Ax *= np.sqrt(stacked_ivarf[stacked_fit_mask][:, np.newaxis])
+        stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
 
         try:
             covar = grizli_utils.safe_invert(np.dot(stacked_Ax.T, stacked_Ax))
@@ -1778,7 +1823,7 @@ class MultiRegionFit:
                         stacked_fn,
                         (s_i, s),
                         kwds={
-                            "rows": best_rows,
+                            "model_seeds": best_model_seeds,
                             "id_shifts": best_id_shifts,
                             "spectral_dir": (
                                 str(self.pipes_dir / "spec" / self.run_name)
@@ -1810,7 +1855,7 @@ class MultiRegionFit:
                         stacked_fn,
                         (s_i, s),
                         kwds={
-                            "rows": best_rows,
+                            "model_seeds": best_model_seeds,
                             "id_shifts": best_id_shifts,
                             "cont_only": True,
                         },
@@ -1930,10 +1975,10 @@ class MultiRegionFit:
                 spec_wavs=spec_wavs,
                 beam_info=beam_info,
                 cont_only=False,
-                rows=best_rows,
+                model_seeds=best_model_seeds,
                 coeffs=output_table[best_iter],
                 memmap=memmap,
-                n_shifted_rows=n_shifted_samples,
+                n_shifted_model_seeds=n_shifted_samples,
                 return_line_flux=True,
             )
 
@@ -2128,3 +2173,111 @@ class MultiRegionFit:
         smm.shutdown()
 
         return
+
+
+def init_forward_model(
+    shared_model_spectra_name: str,
+    shared_model_spectra_shape: tuple[int],
+    shared_temp_arr_name: str,
+    shared_temp_arr_shape: tuple[int],
+    beams: MultiBeam | None = None,
+):
+
+    global shm_model_spectra, shared_model_spectra
+    shm_model_spectra = shared_memory.SharedMemory(
+        name=shared_model_spectra_name, create=False
+    )
+    shared_model_spectra = np.ndarray(
+        shared_model_spectra_shape, dtype=float_dtype, buffer=shm_model_spectra.buf
+    )
+
+    global shm_temp_arr, shared_temp_arr
+    shm_temp_arr = shared_memory.SharedMemory(name=shared_temp_arr_name, create=False)
+    shared_temp_arr = np.ndarray(
+        shared_temp_arr_shape, dtype=float_dtype, buffer=shm_temp_arr.buf
+    )
+
+    if beams is not None:
+        global multibeam_object
+        multibeam_object = deepcopy(beams)
+
+    return shared_model_spectra, shared_temp_arr
+
+
+def forward_model_independent(
+    seg_idx: int,
+    seg_id: int,
+    spec_wavs: np.ndarray[float],
+    temp_offset: int = 0,
+    memmap: bool = False,
+):
+    # print(shared_model_spectra.shape)
+    # print(shared_model_spectra[seg_idx].shape)
+    # print (shared_model_spectra[0][0])
+    # print (shared_model_spectra[seg_idx], flush=True)
+    # print(multibeam_object, flush=True)
+    # print(spec_wavs, flush=True)
+    # print("TEST")
+    # print (shared_model_spectra[0][0], flush=True)
+
+    for sample_i, temp_spec in enumerate(shared_model_spectra[seg_idx]):
+        # print(temp_spec, flush=True)
+        # print("Spec exists")
+        temp_resamp_1d = np.c_[spec_wavs, temp_spec].T
+        # print(temp_resamp_1d.shape)
+        # print("TSET2")
+
+        # for ib, beam in enumerate(multibeam_object.beams):
+        #     # print(f"{ib=}")
+        #     # print(beam.beam.direct * beam.regions_seg_map)
+        #     # print((beam.beam.direct * beam.regions_seg_map).shape)
+        #     # print(temp_resamp_1d.shape)
+        #     test = beam.compute_model(
+        #         spectrum_1d=temp_resamp_1d,
+        #         thumb=beam.beam.direct * (beam.regions_seg_map==seg_id),
+        #         in_place=False,
+        #         is_cgs=True,
+        #     )
+        # print(f"{test.shape=}")
+        # print (np.nansum(test))
+        tmodel = np.hstack(
+            [
+                beam.compute_model(
+                    spectrum_1d=temp_resamp_1d,
+                    thumb=beam.beam.direct * (beam.regions_seg_map == seg_id),
+                    in_place=False,
+                    is_cgs=True,
+                )
+                for beam in multibeam_object.beams
+            ]
+        )
+
+        # import matplotlib.pyplot as plt
+        # for m in multibeam_object.reshape_flat(tmodel):
+        #     plt.imshow(np.log10(m))
+        #     plt.show()
+        # # print(tmodel.shape)
+        # # print (f"{np.nansum(tmodel)}")
+        shared_temp_arr[
+            (shared_model_spectra[seg_idx].shape[0] * seg_idx) + sample_i + temp_offset,
+            :,
+        ] += tmodel
+
+    if memmap:
+        shared_temp_arr.flush()
+
+
+# def init_shared_spectral_templates(
+#     shared_model_spectra_name : str,
+#     shared_model_spectra_shape : tuple[int],
+#     beams: MultiBeam | None = None
+# ):
+
+#     global shared_model_spectra
+#     shm_model_spectra = shared_memory.SharedMemory(name=shared_model_spectra_name)
+#     shared_model_spectra = np.ndarray(
+#         shared_model_spectra_shape, dtype=float_dtype, buffer=shm_model_spectra.buf
+#     )
+
+#     if beams is not None:
+#         init_shared_beams(beams)
