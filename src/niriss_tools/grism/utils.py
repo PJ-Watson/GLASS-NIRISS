@@ -579,7 +579,7 @@ def align_direct_images(
                     new_hdul = fits.HDUList()
                     new_hdul.append(
                         fits.ImageHDU(
-                            data=blotted,
+                            data=blotted.astype(np.float32),
                             header=orig_header,
                         )
                     )

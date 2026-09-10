@@ -463,6 +463,7 @@ def save_binned_data_fits(
     crop: tuple | None = None,
     header: fits.Header | None = None,
     overwrite: bool = True,
+    skip_zero: bool = True,
 ) -> None:
     """
     Create a binned photometric catalogue from a segmentation map.
@@ -495,6 +496,10 @@ def save_binned_data_fits(
     overwrite : bool, optional
         If a catalogue already exists at ``out_path``, this determines if
         it should be written over. By default ``True``.
+    skip_zero : bool, optional
+        Segmentation maps typically indicate non-detections with a ``0``
+        value. By default, this parameter skips over ``0`` values of the
+        input ``bin_labels`` when constructing output catalogues.
     """
 
     phot_cat = Table()
@@ -527,6 +532,9 @@ def save_binned_data_fits(
             except Exception as e:
                 print(e, "whhy")
                 phot_cat[f"{f}_var".lower()] = np.nan
+
+    if (skip_zero) & (bin_ids[0] == 0):
+        phot_cat = phot_cat[1:]
 
     binned_data = fits.HDUList(
         [

@@ -74,14 +74,11 @@ DEFAULT_PLINE = {
 }
 
 
-def _init_beams(beams):
-    global beams_object
-    beams_object = deepcopy(beams)
-
-
 def _init_pipes_sampler(fit_instructions, veldisp, beams, lock_value=None):
     global pipes_sampler
-    pipes_sampler = BagpipesSampler(fit_instructions=fit_instructions, veldisp=veldisp)
+    pipes_sampler = BagpipesSpecGenerator(
+        fit_instructions=fit_instructions, veldisp=veldisp
+    )
     _init_beams(beams)
     global lock_var
     lock_var = lock_value
@@ -146,9 +143,6 @@ class MultiRegionFit:
         self.ra, self.dec = self.MB.ra, self.MB.dec
 
         self.regions_phot_cat = Table.read(self.binned_data_path, "PHOT_CAT")
-        self.regions_phot_cat = self.regions_phot_cat[
-            self.regions_phot_cat["bin_id"].astype(int) != 0
-        ]
         self.n_regions = len(self.regions_phot_cat)
 
         with fits.open(self.binned_data_path) as hdul:
