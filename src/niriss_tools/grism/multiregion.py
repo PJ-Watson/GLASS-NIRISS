@@ -1378,47 +1378,45 @@ class MultiRegionFit:
 
             forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            stacked_modelf = np.dot(out_coeffs, stacked_A)
-
-            full_modelf = np.zeros_like(self.MB.scif)
-            full_modelf[self.MB.fit_mask] = stacked_modelf
+            masked_modelf = np.dot(out_coeffs, stacked_A)
 
             stacked_A[temp_offset:].fill(0.0)
 
             print("Generating nebular lines...")
-            # self.template_sampler.gen_emline_spectra(emline=None)
+            self.template_sampler.gen_emline_spectra(emline=None)
 
-            # stacked_nebularf = np.dot(out_coeffs[temp_offset:], self.template_sampler.model_emline_spectra)
-            # stacked_contf = stacked_modelf - stacked_nebularf
+            full_temp_arr = deepcopy(self.model_spectra_arr)
+            self.model_spectra_arr[:] = (
+                self.template_sampler.model_emline_spectra.reshape(
+                    self.model_spectra_arr.shape
+                )
+            )
 
-            # print("Generating continuum...")
-            # with multiprocessing.Pool(
-            #     processes=cpu_count,
-            #     initializer=_init_pipes_sampler,
-            #     initargs=(
-            #         fit_instructions,
-            #         veldisp,
-            #         self.MB.beams,
-            #     ),
-            # ) as pool:
-            #     for s_i, s in enumerate(self.regions_seg_ids):
-            #         pool.apply_async(
-            #             stacked_fn,
-            #             (s_i, s),
-            #             kwds={
-            #                 "model_seeds": best_model_seeds,
-            #                 "id_shifts": best_id_shifts,
-            #                 "cont_only": True,
-            #             },
-            #         )
-            #     pool.close()
-            #     pool.join()
+            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            # stacked_contf = np.dot(out_coeffs, stacked_A)
+            masked_nebularf = np.dot(out_coeffs, stacked_A)
 
+            masked_contf = masked_modelf - masked_nebularf
+
+            self.model_spectra_arr[:] = full_temp_arr[:]
+            del full_temp_arr
+
+            # Reset the forward model array
+            stacked_A[temp_offset:].fill(0.0)
+
+            # Reconstruct the full flattened arrays without the fit mask
+            full_modelf = np.zeros_like(self.MB.scif)
+            full_modelf[self.MB.fit_mask] = masked_modelf
+
+            full_nebularf = np.zeros_like(self.MB.scif)
+            full_nebularf[self.MB.fit_mask] = masked_nebularf
+
+            full_contf = np.zeros_like(self.MB.scif)
+            full_contf[self.MB.fit_mask] = masked_contf
+
+            # Create the FITS file
             stacked_hdul = fits.HDUList(fits.PrimaryHDU())
 
-            start_idx = 0
             for ib, shape in enumerate(self.MB.shapes):
 
                 slice_beam = self.MB.idf == ib
@@ -1444,14 +1442,14 @@ class MultiRegionFit:
                         data=full_modelf[slice_beam].reshape(shape),
                         name="MODEL",
                     ),
-                    # fits.ImageHDU(
-                    #     data=stacked_contf[slice_beam].reshape(shape),
-                    #     name="CONT",
-                    # ),
-                    # fits.ImageHDU(
-                    #     data=stacked_nebularf[slice_beam].reshape(shape),
-                    #     name="NEB",
-                    # ),
+                    fits.ImageHDU(
+                        data=full_contf[slice_beam].reshape(shape),
+                        name="CONT",
+                    ),
+                    fits.ImageHDU(
+                        data=full_nebularf[slice_beam].reshape(shape),
+                        name="NEB",
+                    ),
                 ]
                 for h in hdus:
                     k = f"{self.MB.beams[0].grism.pupil}-{self.MB.beams[0].grism.filter}"
