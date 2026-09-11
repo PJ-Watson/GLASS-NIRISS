@@ -117,7 +117,7 @@ class BagpipesTemplateSampler(TemplateSampler):
     apply_R_curve : bool, optional
         Implement the variable spectral resolution of the JWST/NIRISS
         grisms when generating spectra, even if not in the original model
-        components. By default ``True``.
+        components. By default ``False``.
     """
 
     def __init__(
@@ -128,7 +128,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         cache_all_spectra: bool = True,
         veldisp: float = 50,
         spec_wavs: np.ndarray[float] = np.arange(10000.0, 23000.0, 22.5),
-        apply_R_curve: bool = True,
+        apply_R_curve: bool = False,
     ):
 
         super().__init__(seed)
@@ -177,7 +177,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         if self.cache_all_spectra:
 
             self.all_model_spectra, self.all_model_line_fluxes = (
-                self.gen_spectra_from_params(self.all_model_params[:10000])
+                self.gen_spectra_from_params(self.all_model_params[:])
             )
 
     def gen_all_spectra_from_seeds(
