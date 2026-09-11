@@ -373,7 +373,7 @@ class BagpipesTemplateSampler(TemplateSampler):
 
     def gen_emline_spectra(
         self,
-        emline: str | ArrayLike,
+        emline: str | ArrayLike | None,
     ):
         """
         Generate emission line spectra from `self.model_params`.
@@ -393,8 +393,12 @@ class BagpipesTemplateSampler(TemplateSampler):
             `here
             <https://bagpipes.readthedocs.io/en/latest/model_galaxies.html\
 #getting-observables-line-fluxes>`__
-            for more details).
+            for more details). If ``None``, then all emission lines will
+            be modelled.
         """
+
+        if emline is None:
+            emline = self.line_names.copy()
 
         # Ensure that emission lines will always be an array
         emline = np.atleast_1d(emline)

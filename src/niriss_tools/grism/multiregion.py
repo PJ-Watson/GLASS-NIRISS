@@ -58,30 +58,12 @@ from niriss_tools.grism import float_dtype
 
 __all__ = ["MultiRegionFit", "DEFAULT_PLINE"]
 
-# Necessary to avoid bugs in shared memory garbage collection
-pipes_sampler = None
-beams_object = None
-shm_temp_arr = None
-shared_temp_arr = None
-shm_model_spectra = None
-shared_model_spectra = None
-
 DEFAULT_PLINE = {
     "pixscale": 0.06,
     "pixfrac": 1.0,
     "size": 5,
     "kernel": "lanczos3",
 }
-
-
-def _init_pipes_sampler(fit_instructions, veldisp, beams, lock_value=None):
-    global pipes_sampler
-    pipes_sampler = BagpipesSpecGenerator(
-        fit_instructions=fit_instructions, veldisp=veldisp
-    )
-    _init_beams(beams)
-    global lock_var
-    lock_var = lock_value
 
 
 class MultiRegionFit:
@@ -636,160 +618,6 @@ class MultiRegionFit:
         return header
 
     @staticmethod
-    def _gen_stacked_templates_from_pipes(
-        seg_idx=None,
-        seg_id=None,
-        shared_seg_name=None,
-        seg_maps_shape=None,
-        shared_models_name=None,
-        models_shape=None,
-        posterior_dir=None,
-        spectral_dir=None,
-        n_samples=None,
-        spec_wavs=None,
-        beam_info=None,
-        temp_offset=None,
-        cont_only=False,
-        rm_line=None,
-        model_seeds=None,
-        memmap: bool = False,
-        id_shifts=None,
-        n_shifted_model_seeds=None,
-    ):
-        seg_id = int(seg_id)
-
-        try:
-
-            if memmap:
-                seg_maps = np.memmap(
-                    shared_seg_name, dtype=float_dtype, shape=seg_maps_shape, mode="r+"
-                )
-                temps_arr = np.memmap(
-                    shared_models_name, dtype=float_dtype, shape=models_shape, mode="r+"
-                )
-            else:
-                shm_seg_maps = shared_memory.SharedMemory(name=shared_seg_name)
-                seg_maps = np.ndarray(
-                    seg_maps_shape, dtype=float_dtype, buffer=shm_seg_maps.buf
-                )
-                shm_temps = shared_memory.SharedMemory(name=shared_models_name)
-                temps_arr = np.ndarray(
-                    models_shape, dtype=float_dtype, buffer=shm_temps.buf
-                )
-
-            if spectral_dir is not None:
-
-                temps_resampled = np.zeros(
-                    (
-                        len(model_seeds) + len(id_shifts) * n_shifted_model_seeds,
-                        spec_wavs.shape[0],
-                    )
-                )
-                with h5py.File(
-                    Path(spectral_dir) / f"{seg_id}.h5",
-                    "r",
-                ) as spec_file:
-                    temps_resampled[: len(model_seeds), :] = np.array(
-                        spec_file["spec_data"]
-                    )[model_seeds]
-
-                # Just make one set of templates from all possible seg ids
-                if (id_shifts is not None) and (len(id_shifts) > 0):
-                    for s_i, s in enumerate(id_shifts):
-                        shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
-                        with h5py.File(
-                            Path(spectral_dir) / f"{shifted_id}.h5",
-                            "r",
-                        ) as spec_file:
-                            temps_resampled[
-                                int(
-                                    len(model_seeds) + s_i * n_shifted_model_seeds
-                                ) : int(
-                                    len(model_seeds) + (s_i + 1) * n_shifted_model_seeds
-                                ) :
-                            ] = np.array(spec_file["spec_data"])[
-                                model_seeds[:n_shifted_model_seeds]
-                            ]
-
-            else:
-                with h5py.File(Path(posterior_dir) / f"{seg_id}.h5", "r") as post_file:
-                    samples2d = np.zeros(
-                        (
-                            len(model_seeds) + len(id_shifts) * n_shifted_model_seeds,
-                            post_file["samples2d"].shape[1],
-                        )
-                    )
-                    samples2d[: len(model_seeds), :] = np.array(post_file["samples2d"])[
-                        model_seeds
-                    ]
-
-                # Just make one set of posterior samples from all possible seg ids
-                if (id_shifts is not None) and (len(id_shifts) > 0):
-                    for s_i, s in enumerate(id_shifts):
-                        shifted_id = int((seg_id + s) % np.nanmax(seg_maps[0]))
-                        with h5py.File(
-                            Path(posterior_dir) / f"{shifted_id}.h5", "r"
-                        ) as post_file:
-                            samples2d[
-                                int(
-                                    len(model_seeds) + s_i * n_shifted_model_seeds
-                                ) : int(
-                                    len(model_seeds) + (s_i + 1) * n_shifted_model_seeds
-                                ) :
-                            ] = np.array(post_file["samples2d"])[
-                                model_seeds[:n_shifted_model_seeds]
-                            ]
-
-                temps_resampled = np.zeros((samples2d.shape[0], spec_wavs.shape[0]))
-                for sample_i, sample in enumerate(samples2d):
-
-                    temps_resampled[sample_i] = pipes_sampler.sample(
-                        sample,
-                        spec_wavs=spec_wavs,
-                        cont_only=cont_only,
-                        rm_line=rm_line,
-                    )[1]
-
-            for sample_i, temp_spec in enumerate(temps_resampled):
-
-                temp_resamp_1d = np.c_[spec_wavs, temp_spec].T
-
-                i0 = 0
-                for k_i, (k, v) in enumerate(beam_info.items()):
-                    for ib in v["list_idx"]:
-                        beam = beams_object[ib]
-                        if seg_maps.ndim == 3:
-                            beam_seg = seg_maps[ib] == seg_id
-                        else:
-                            beam_seg = seg_maps[seg_idx][ib]
-                        tmodel = beam.compute_model(
-                            spectrum_1d=temp_resamp_1d,
-                            thumb=beam.beam.direct * beam_seg,
-                            in_place=False,
-                            is_cgs=True,
-                        )
-                        temps_arr[
-                            (n_samples * seg_idx) + sample_i + temp_offset,
-                            i0 : i0 + np.prod(v["2d_shape"]),
-                        ] += tmodel
-
-                    temps_arr[
-                        (n_samples * seg_idx) + sample_i + temp_offset,
-                        i0 : i0 + np.prod(v["2d_shape"]),
-                    ] /= len(v["list_idx"])
-
-                    i0 += np.prod(v["2d_shape"])
-
-            if memmap:
-                temps_arr.flush()
-
-        except:
-            raise Exception(
-                shared_models_name
-                + "".join(traceback.format_exception(*sys.exc_info()))
-            )
-
-    @staticmethod
     def _gen_beam_templates_from_pipes(
         seg_idx=None,
         seg_id=None,
@@ -909,41 +737,6 @@ class MultiRegionFit:
                 shared_models_name
                 + "".join(traceback.format_exception(*sys.exc_info()))
             )
-
-    @staticmethod
-    def _reduce_seg_map(
-        seg_idx=None,
-        seg_id=None,
-        shared_input=None,
-        init_shape=None,
-        shared_output=None,
-        output_shape=None,
-        beam_idx=None,
-        oversamp_factor=None,
-        memmap: bool = False,
-    ):
-        if memmap:
-            init_arr = np.memmap(
-                shared_input, dtype=float_dtype, shape=init_shape, mode="r+"
-            )
-            output_arr = np.memmap(
-                shared_output, dtype=float_dtype, shape=output_shape, mode="r+"
-            )
-        else:
-            shm_init = shared_memory.SharedMemory(name=shared_input)
-            init_arr = np.ndarray(init_shape, dtype=float_dtype, buffer=shm_init.buf)
-            shm_output = shared_memory.SharedMemory(name=shared_output)
-            output_arr = np.ndarray(
-                output_shape, dtype=float_dtype, buffer=shm_output.buf
-            )
-
-        output_arr[seg_idx, beam_idx, :, :] = block_reduce(
-            init_arr == seg_id,
-            oversamp_factor,
-            func=np.mean,
-        )
-        if memmap:
-            output_arr.flush()
 
     def fit_at_z(
         self,
@@ -1116,6 +909,8 @@ class MultiRegionFit:
         if spec_wavs is None:
             spec_wavs = np.arange(10000.0, 23000.0, 22.5)
 
+        self.spec_wavs = spec_wavs
+
         if memmap:
             if temp_dir is None:
                 temp_dir = Path.cwd()
@@ -1156,7 +951,7 @@ class MultiRegionFit:
             cpu_count=cpu_count,
             cache_all_spectra=cache_spec,
             veldisp=veldisp,
-            spec_wavs=spec_wavs,
+            spec_wavs=self.spec_wavs,
         )
 
         # Try to allow for both memory and file-backed multiprocessing of
@@ -1229,7 +1024,7 @@ class MultiRegionFit:
         # parameters change on each iteration.
         fwd_model_fn = partial(
             forward_model_independent,
-            spec_wavs=spec_wavs,
+            spec_wavs=self.spec_wavs,
             temp_offset=temp_offset,
             memmap=memmap,
         )
@@ -1297,24 +1092,7 @@ class MultiRegionFit:
             initial=0,
         )
 
-        # Initialise the shared memory for the sampled spectra
-        model_spectra_arr_shape = (
-            len(self.regions_seg_ids),
-            n_samples + n_shifted * n_shifted_samples,
-            len(spec_wavs),
-        )
-        shm_model_spectra = self.smm.SharedMemory(
-            size=np.dtype(float_dtype).itemsize * np.prod(model_spectra_arr_shape),
-        )
-        model_spectra_arr = np.ndarray(
-            model_spectra_arr_shape,
-            dtype=float_dtype,
-            buffer=shm_model_spectra.buf,
-        )
-        shm_model_spectra_name = shm_model_spectra.name
-
-        # Ensure the array is blank on first run
-        model_spectra_arr.fill(0.0)
+        self.initialise_shared_templates(n_samples + (n_shifted * n_shifted_samples))
 
         if n_prev_iters < total_iters:
 
@@ -1330,8 +1108,8 @@ class MultiRegionFit:
                 processes=cpu_count,
                 initializer=init_forward_model,
                 initargs=(
-                    shm_model_spectra_name,
-                    model_spectra_arr_shape,
+                    self.shm_model_spectra.name,
+                    self.model_spectra_arr.shape,
                     shm_stacked_A.name,
                     stacked_A_shape,
                     self.MB,
@@ -1373,15 +1151,13 @@ class MultiRegionFit:
                     )
                     t0 = time()
 
-                    shm_model_spectra_name, model_spectra_arr_shape = (
-                        self.template_sampler.gen_all_spectra_from_seeds(
-                            model_seeds=model_seeds,
-                            extra_region_idxs=id_shifts,
-                            n_extra_samples=n_shifted_samples,
-                            shared_memory_manger=self.smm,
-                            shared_memory_name=shm_model_spectra_name,
-                            shared_memory_shape=model_spectra_arr_shape,
-                        )
+                    self.template_sampler.gen_all_spectra_from_seeds(
+                        model_seeds=model_seeds,
+                        extra_region_idxs=id_shifts,
+                        n_extra_samples=n_shifted_samples,
+                        shared_memory_manger=self.smm,
+                        shared_memory_name=self.shm_model_spectra.name,
+                        shared_memory_shape=self.model_spectra_arr.shape,
                     )
 
                     # Generate the forward-modelled spectra
@@ -1509,204 +1285,206 @@ class MultiRegionFit:
 
                     # Reset the template arrays
                     stacked_A[temp_offset:].fill(0.0)
-                    model_spectra_arr.fill(0.0)
+                    self.model_spectra_arr.fill(0.0)
 
                 del stacked_Ax
 
-        if True:
-            return
-        exit()
+        # There must be a better way to obtain the coefficients, but
+        # slicing tables is not entirely straightforward
+        best_iter = np.argmin(output_table["chi2"])
+        out_coeffs = np.asarray(
+            [
+                i
+                for d in output_table[best_iter][len(init_col_names) :]
+                for i in np.atleast_1d(d)
+            ]
+        ).ravel()
 
-        # # There must be a better way to obtain the coefficients, but
-        # # slicing tables is not entirely straightforward
-        # best_iter = np.argmin(output_table["chi2"])
-        # out_coeffs = np.asarray(
-        #     [
-        #         i
-        #         for d in output_table[best_iter][len(init_col_names) :]
-        #         for i in np.atleast_1d(d)
-        #     ]
-        # ).ravel()
+        # Repopulate the background parameters for MultiBeam
+        if fit_background:
+            for ib, beam in enumerate(self.MB.beams):
+                # for k_i, (k, v) in enumerate(beam_info.items()):
+                # for ib in v["list_idx"]:
+                self.MB.beams[ib].background = out_coeffs[ib]
 
-        # # Repopulate the background parameters for MultiBeam
-        # if fit_background:
-        #     for k_i, (k, v) in enumerate(beam_info.items()):
-        #         for ib in v["list_idx"]:
-        #             self.MB.beams[ib].background = out_coeffs[k_i]
+        self.best_model_seeds = np.array(
+            [int(s) for s in output_table["model_seeds"][best_iter]]
+        )
+        self.best_id_shifts = np.array(
+            [int(s) for s in output_table["id_shifts"][best_iter]]
+        )
 
-        # best_model_seeds = np.array(
-        #     [int(s) for s in output_table["model_seeds"][best_iter]]
-        # )
-        # best_id_shifts = np.array(
-        #     [int(s) for s in output_table["id_shifts"][best_iter]]
-        # )
+        # Refill array with best model
+        print("Calculating covariance array...")
+        with multiprocessing.Pool(
+            processes=cpu_count,
+            initializer=init_forward_model,
+            initargs=(
+                self.shm_model_spectra.name,
+                self.model_spectra_arr.shape,
+                shm_stacked_A.name,
+                stacked_A_shape,
+                self.MB,
+            ),
+        ) as forward_model_pool:
+            # shm_model_spectra_name, model_spectra_arr.shape = (
+            self.template_sampler.gen_all_spectra_from_seeds(
+                model_seeds=self.best_model_seeds,
+                extra_region_idxs=self.best_id_shifts,
+                n_extra_samples=n_shifted_samples,
+                shared_memory_manger=self.smm,
+                shared_memory_name=self.shm_model_spectra.name,
+                shared_memory_shape=self.model_spectra_arr.shape,
+            )
+            # )
 
-        # # Refill array with best model
-        # print("Calculating covariance array...")
-        # with multiprocessing.Pool(**pool_kwargs) as pool:
-        #     for s_i, s in enumerate(self.regions_seg_ids):
-        #         pool.apply_async(
-        #             stacked_fn,
-        #             (s_i, s),
-        #             kwds={
-        #                 "model_seeds": best_model_seeds,
-        #                 "id_shifts": best_id_shifts,
-        #                 "spectral_dir": (
-        #                     str(self.pipes_dir / "spec" / self.run_name)
-        #                     if cache_spec
-        #                     else None
-        #                 ),
-        #             },
-        #             error_callback=print,
-        #         )
-        #     pool.close()
-        #     pool.join()
+            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-        # stacked_Ax = stacked_A[:, self.MB.fit_mask]
-        # ok_temp = (np.sum(stacked_Ax, axis=1) > 0) & (out_coeffs != 0)
-        # stacked_Ax = stacked_Ax[ok_temp, :].T * 1
-        # stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
+            ok_temp = (np.sum(stacked_A, axis=1) > 0) & (out_coeffs != 0)
+            stacked_Ax = stacked_A[ok_temp, :].T * 1
+            stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
 
-        # try:
-        #     covar = grizli_utils.safe_invert(np.dot(stacked_Ax.T, stacked_Ax))
-        # except:
-        #     N = ok_temp.sum()
-        #     covar = np.zeros((N, N))
+            try:
+                covar = grizli_utils.safe_invert(np.dot(stacked_Ax.T, stacked_Ax))
+            except:
+                N = ok_temp.sum()
+                covar = np.zeros((N, N))
 
-        # covard = np.sqrt(covar.diagonal())
+            covard = np.sqrt(covar.diagonal())
 
-        # coeffs_errs = out_coeffs * 0.0
-        # coeffs_errs[ok_temp] = covard
+            coeffs_errs = out_coeffs * 0.0
+            coeffs_errs[ok_temp] = covard
 
-        # chi2nu = output_table["chi2"][best_iter] / (
-        #     self.MB.DoF - output_table["unique_temp"][best_iter]
-        # )
+            chi2nu = output_table["chi2"][best_iter] / (
+                self.MB.DoF - output_table["unique_temp"][best_iter]
+            )
 
-        # # Ensure that the array is cleaned before repopulating
-        # stacked_A[temp_offset:].fill(0.0)
+            # Ensure that the array is cleaned before repopulating
+            stacked_A[temp_offset:].fill(0.0)
 
-        # # Largely unmodified from the original grizli code. Included within
-        # # this particular class method to avoid dealing with SharedMemory
-        # if save_stacks:
-        #     print("Generating models...")
-        #     with multiprocessing.Pool(
-        #         **pool_kwargs,
-        #     ) as pool:
-        #         for s_i, s in enumerate(self.regions_seg_ids):
-        #             pool.apply_async(
-        #                 stacked_fn,
-        #                 (s_i, s),
-        #                 kwds={
-        #                     "model_seeds": best_model_seeds,
-        #                     "id_shifts": best_id_shifts,
-        #                     "spectral_dir": (
-        #                         str(self.pipes_dir / "spec" / self.run_name)
-        #                         if cache_spec
-        #                         else None
-        #                     ),
-        #                 },
-        #                 error_callback=print,
-        #             )
-        #         pool.close()
-        #         pool.join()
+            # Largely unmodified from the original grizli code. Included within
+            # this particular class method to avoid dealing with SharedMemory
+            # if save_stacks:
+            print("Generating models...")
 
-        #     stacked_modelf = np.dot(out_coeffs, stacked_A)
+            self.template_sampler.gen_all_spectra_from_seeds(
+                model_seeds=self.best_model_seeds,
+                extra_region_idxs=self.best_id_shifts,
+                n_extra_samples=n_shifted_samples,
+                shared_memory_manger=self.smm,
+                shared_memory_name=self.shm_model_spectra.name,
+                shared_memory_shape=self.model_spectra_arr.shape,
+            )
 
-        #     stacked_A[temp_offset:].fill(0.0)
+            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-        #     print("Generating continuum...")
-        #     with multiprocessing.Pool(
-        #         processes=cpu_count,
-        #         initializer=_init_pipes_sampler,
-        #         initargs=(
-        #             fit_instructions,
-        #             veldisp,
-        #             self.MB.beams,
-        #         ),
-        #     ) as pool:
-        #         for s_i, s in enumerate(self.regions_seg_ids):
-        #             pool.apply_async(
-        #                 stacked_fn,
-        #                 (s_i, s),
-        #                 kwds={
-        #                     "model_seeds": best_model_seeds,
-        #                     "id_shifts": best_id_shifts,
-        #                     "cont_only": True,
-        #                 },
-        #             )
-        #         pool.close()
-        #         pool.join()
+            stacked_modelf = np.dot(out_coeffs, stacked_A)
 
-        #     stacked_contf = np.dot(out_coeffs, stacked_A)
+            full_modelf = np.zeros_like(self.MB.scif)
+            full_modelf[self.MB.fit_mask] = stacked_modelf
 
-        #     stacked_hdul = fits.HDUList(fits.PrimaryHDU())
+            stacked_A[temp_offset:].fill(0.0)
 
-        #     start_idx = 0
-        #     for i, (k, v) in enumerate(beam_info.items()):
+            print("Generating nebular lines...")
+            # self.template_sampler.gen_emline_spectra(emline=None)
 
-        #         slice_plot = slice(start_idx, start_idx + np.prod(v["2d_shape"]))
+            # stacked_nebularf = np.dot(out_coeffs[temp_offset:], self.template_sampler.model_emline_spectra)
+            # stacked_contf = stacked_modelf - stacked_nebularf
 
-        #         hdus = [
-        #             fits.ImageHDU(
-        #                 data=stacked_scif[slice_plot].reshape(v["2d_shape"]),
-        #                 name="SCI",
-        #             ),
-        #             fits.ImageHDU(
-        #                 data=stacked_weightf[slice_plot].reshape(v["2d_shape"]),
-        #                 name="WHT",
-        #             ),
-        #             fits.ImageHDU(
-        #                 data=stacked_ivarf[slice_plot].reshape(v["2d_shape"]),
-        #                 name="IVAR",
-        #             ),
-        #             fits.ImageHDU(
-        #                 data=(stacked_fit_mask[slice_plot] * 1.0).reshape(
-        #                     v["2d_shape"]
-        #                 ),
-        #                 name="MASK",
-        #             ),
-        #             fits.ImageHDU(
-        #                 data=stacked_modelf[slice_plot].reshape(v["2d_shape"]),
-        #                 name="MODEL",
-        #             ),
-        #             fits.ImageHDU(
-        #                 data=stacked_contf[slice_plot].reshape(v["2d_shape"]),
-        #                 name="CONT",
-        #             ),
-        #         ]
-        #         for h in hdus:
-        #             h.header["EXTVER"] = k
-        #             h.header["RA"] = (self.ra, "Right ascension")
-        #             h.header["DEC"] = (self.dec, "Declination")
-        #             h.header["GRISM"] = (k.split("_")[0], "Grism")
-        #             h.header["CONF"] = (
-        #                 self.MB.beams[0].beam.conf.conf_file,
-        #                 "Configuration file",
-        #             )
-        #             h.header["REDSHIFT"] = (z, "Redshift used")
-        #             h.header["CHI2"] = (
-        #                 output_table["chi2"][best_iter],
-        #                 "Chi^2 statistic",
-        #             )
-        #             h.header["DOF"] = (
-        #                 self.MB.DoF,
-        #                 "Degrees of freedom (active pixels)",
-        #             )
-        #             h.header["NTEMP"] = (
-        #                 output_table["unique_temp"][best_iter],
-        #                 "Number of unique templates",
-        #             )
-        #             h.header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
-        #             h.header = self.add_pipes_info(h.header)
-        #         stacked_hdul.extend(hdus)
+            # print("Generating continuum...")
+            # with multiprocessing.Pool(
+            #     processes=cpu_count,
+            #     initializer=_init_pipes_sampler,
+            #     initargs=(
+            #         fit_instructions,
+            #         veldisp,
+            #         self.MB.beams,
+            #     ),
+            # ) as pool:
+            #     for s_i, s in enumerate(self.regions_seg_ids):
+            #         pool.apply_async(
+            #             stacked_fn,
+            #             (s_i, s),
+            #             kwds={
+            #                 "model_seeds": best_model_seeds,
+            #                 "id_shifts": best_id_shifts,
+            #                 "cont_only": True,
+            #             },
+            #         )
+            #     pool.close()
+            #     pool.join()
 
-        #         start_idx += np.prod(v["2d_shape"])
+            # stacked_contf = np.dot(out_coeffs, stacked_A)
 
-        #     stacked_hdul.writeto(
-        #         multireg_out_dir / f"regions_{self.obj_id:05d}_z_{z}_stacked.fits",
-        #         output_verify="silentfix",
-        #         overwrite=True,
-        #     )
+            stacked_hdul = fits.HDUList(fits.PrimaryHDU())
+
+            start_idx = 0
+            for ib, shape in enumerate(self.MB.shapes):
+
+                slice_beam = self.MB.idf == ib
+
+                hdus = [
+                    fits.ImageHDU(
+                        data=self.MB.scif[slice_beam].reshape(shape),
+                        name="SCI",
+                    ),
+                    fits.ImageHDU(
+                        data=self.MB.weightf[slice_beam].reshape(shape),
+                        name="WHT",
+                    ),
+                    fits.ImageHDU(
+                        data=self.MB.ivarf[slice_beam].reshape(shape),
+                        name="IVAR",
+                    ),
+                    fits.ImageHDU(
+                        data=self.MB.fit_mask[slice_beam].reshape(shape) * 1.0,
+                        name="MASK",
+                    ),
+                    fits.ImageHDU(
+                        data=full_modelf[slice_beam].reshape(shape),
+                        name="MODEL",
+                    ),
+                    # fits.ImageHDU(
+                    #     data=stacked_contf[slice_beam].reshape(shape),
+                    #     name="CONT",
+                    # ),
+                    # fits.ImageHDU(
+                    #     data=stacked_nebularf[slice_beam].reshape(shape),
+                    #     name="NEB",
+                    # ),
+                ]
+                for h in hdus:
+                    k = f"{self.MB.beams[0].grism.pupil}-{self.MB.beams[0].grism.filter}"
+                    h.header["EXTVER"] = ib
+                    h.header["RA"] = (self.ra, "Right ascension")
+                    h.header["DEC"] = (self.dec, "Declination")
+                    h.header["GRISM"] = (k.split("-")[0], "Grism")
+                    h.header["CONF"] = (
+                        self.MB.beams[0].beam.conf.conf_file,
+                        "Configuration file",
+                    )
+                    h.header["REDSHIFT"] = (z, "Redshift used")
+                    h.header["CHI2"] = (
+                        output_table["chi2"][best_iter],
+                        "Chi^2 statistic",
+                    )
+                    h.header["DOF"] = (
+                        self.MB.DoF,
+                        "Degrees of freedom (active pixels)",
+                    )
+                    h.header["NTEMP"] = (
+                        output_table["unique_temp"][best_iter],
+                        "Number of unique templates",
+                    )
+                    h.header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
+                    h.header = self.add_pipes_info(h.header)
+                stacked_hdul.extend(hdus)
+
+            stacked_hdul.writeto(
+                multireg_out_dir / f"regions_{self.obj_id:05d}_z_{z}_stacked.fits",
+                output_verify="silentfix",
+                overwrite=True,
+            )
 
         # if save_lines:
         #     beam_models_len = 0
@@ -1965,6 +1743,26 @@ class MultiRegionFit:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.__del__()
+
+    def initialise_shared_templates(self, n_spec_per_region: int):
+
+        # Initialise the shared memory for the sampled spectra
+        model_spectra_arr_shape = (
+            len(self.regions_seg_ids),
+            n_spec_per_region,
+            len(self.spec_wavs),
+        )
+        self.shm_model_spectra = self.smm.SharedMemory(
+            size=np.dtype(float_dtype).itemsize * np.prod(model_spectra_arr_shape),
+        )
+        self.model_spectra_arr = np.ndarray(
+            model_spectra_arr_shape,
+            dtype=float_dtype,
+            buffer=self.shm_model_spectra.buf,
+        )
+
+        # Ensure the array is blank on first run
+        self.model_spectra_arr.fill(0.0)
 
 
 def init_forward_model(
