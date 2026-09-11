@@ -976,7 +976,10 @@ class MultiRegionFit:
         # Non-template rows in A (background and polynomial components)
         self.temp_offset = A.shape[0]
 
+        # Set up both the shared memory and process pool
         self.initialise_shared_memory(n_samples + (n_shifted * n_shifted_samples))
+
+        self.initialise_process_pool(cpu_count)
 
         self.stacked_A[: self.temp_offset] = A[:, self.MB.fit_mask]
 
@@ -1081,190 +1084,174 @@ class MultiRegionFit:
 
             iterations = np.arange(n_prev_iters, total_iters)
 
-            with multiprocessing.Pool(
-                processes=cpu_count,
-                initializer=init_forward_model,
-                initargs=(
-                    self.shm_model_spectra.name,
-                    self.model_spectra_arr.shape,
-                    self.shm_stacked_A.name,
-                    self.stacked_A.shape,
-                    self.MB,
-                ),
-            ) as forward_model_pool:
-
-                for iteration in iterations:
-                    try:
-                        curr_line = (
-                            f"Minimum chi2: {np.nanmin(output_table["chi2"]):.3f}"
-                            f"\t\t(Iteration {np.nanargmin(output_table["chi2"])})"
-                        )
-                    except:
-                        curr_line = "Minimum chi2: ---"
-                    log_with_offset("", curr_line=curr_line)
-
-                    # On the final iteration, reuse the samples from the current
-                    # best-fit solution
-                    if TWO_STAGE and (iteration == iterations[-1]):
-
-                        best_iter = np.nanargmin(output_table["chi2"])
-
-                        model_seeds = np.array(
-                            [int(s) for s in output_table["model_seeds"][best_iter]]
-                        )
-                        id_shifts = np.array(
-                            [int(s) for s in output_table["id_shifts"][best_iter]]
-                        )
-                    else:
-                        model_seeds, id_shifts = (
-                            self.template_sampler.gen_model_seeds_from_iter(
-                                iteration, n_samples, n_shifted
-                            )
-                        )
-
-                    log_with_offset(
-                        f"Iteration {iteration}, {model_seeds=}, {id_shifts=}",
-                        curr_line=curr_line,
+            for iteration in iterations:
+                try:
+                    curr_line = (
+                        f"Minimum chi2: {np.nanmin(output_table["chi2"]):.3f}"
+                        f"\t\t(Iteration {np.nanargmin(output_table["chi2"])})"
                     )
-                    t0 = time()
+                except:
+                    curr_line = "Minimum chi2: ---"
+                log_with_offset("", curr_line=curr_line)
 
-                    self.template_sampler.gen_all_spectra_from_seeds(
-                        model_seeds=model_seeds,
-                        extra_region_idxs=id_shifts,
-                        n_extra_samples=n_shifted_samples,
-                        shared_memory_manger=self.smm,
-                        shared_memory_name=self.shm_model_spectra.name,
-                        shared_memory_shape=self.model_spectra_arr.shape,
+                # On the final iteration, reuse the samples from the current
+                # best-fit solution
+                if TWO_STAGE and (iteration == iterations[-1]):
+
+                    best_iter = np.nanargmin(output_table["chi2"])
+
+                    model_seeds = np.array(
+                        [int(s) for s in output_table["model_seeds"][best_iter]]
+                    )
+                    id_shifts = np.array(
+                        [int(s) for s in output_table["id_shifts"][best_iter]]
+                    )
+                else:
+                    model_seeds, id_shifts = (
+                        self.template_sampler.gen_model_seeds_from_iter(
+                            iteration, n_samples, n_shifted
+                        )
                     )
 
-                    # Generate the forward-modelled spectra
-                    log_with_offset(f"Generating models...", curr_line=curr_line)
+                log_with_offset(
+                    f"Iteration {iteration}, {model_seeds=}, {id_shifts=}",
+                    curr_line=curr_line,
+                )
+                t0 = time()
 
-                    forward_model_pool.starmap(
-                        fwd_model_fn, enumerate(self.regions_seg_ids)
+                self.template_sampler.gen_all_spectra_from_seeds(
+                    model_seeds=model_seeds,
+                    extra_region_idxs=id_shifts,
+                    n_extra_samples=n_shifted_samples,
+                    shared_memory_manger=self.smm,
+                    shared_memory_name=self.shm_model_spectra.name,
+                    shared_memory_shape=self.model_spectra_arr.shape,
+                )
+
+                # Generate the forward-modelled spectra
+                log_with_offset(f"Generating models...", curr_line=curr_line)
+
+                self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+
+                t1 = time()
+
+                log_with_offset(
+                    LINE_UP + f"Generating models...    DONE in {t1-t0:.3f}s",
+                    curr_line=curr_line,
+                )
+
+                # Remove any negative or zero templates
+                ok_temp = np.sum(self.stacked_A, axis=1) > 0
+
+                out_coeffs = np.zeros(self.stacked_A.shape[0])
+
+                # Transpose the template array
+                stacked_Ax = self.stacked_A[ok_temp].T
+
+                stacked_Ax *= sivarf_masked[:, np.newaxis]
+
+                # Change the max iters and tolerance for the final iteration
+                if TWO_STAGE and (iteration == iterations[-1]):
+                    log_with_offset("Final iteration", curr_line=curr_line)
+                    _nnls_i = nnls_iters[1]
+                    _nnls_t = nnls_tol[1]
+                else:
+                    _nnls_i = nnls_iters[0]
+                    _nnls_t = nnls_tol[0]
+
+                log_with_offset("NNLS fitting...         ", curr_line=curr_line)
+
+                # Three different methods of fitting, each with different call
+                # signatures and return values
+                if nnls_method == "adelie" and HAS_ADELIE:
+
+                    state = adelie.solver.bvls(
+                        stacked_Ax,
+                        y,
+                        lower=np.zeros(stacked_Ax.shape[-1], dtype=float_dtype),
+                        upper=np.full(stacked_Ax.shape[-1], np.inf, dtype=float_dtype),
+                        max_iters=_nnls_i,
+                        tol=_nnls_t,
+                        n_threads=cpu_count,
                     )
+                    state.solve()
+                    state_iters = deepcopy(state.iters)
+                    coeffs = deepcopy(state.beta)
+                    coeffs[: self.MB.N] -= pedestal
+                    del state
 
-                    t1 = time()
+                elif nnls_method == "numba":
 
-                    log_with_offset(
-                        LINE_UP + f"Generating models...    DONE in {t1-t0:.3f}s",
-                        curr_line=curr_line,
+                    nnls_solver = CDNNLS(stacked_Ax, y)
+                    nnls_solver.run(n_iter=_nnls_i, epsilon=_nnls_t)
+                    coeffs = nnls_solver.w
+                    coeffs[: self.MB.N] -= pedestal
+
+                elif nnls_method == "fnnls":
+                    coeffs = fnnls(
+                        stacked_Ax,
+                        y,
+                        tolerance=_nnls_t,
+                        max_iterations=_nnls_i,
                     )
+                    coeffs[: self.MB.N] -= pedestal
 
-                    # Remove any negative or zero templates
-                    ok_temp = np.sum(self.stacked_A, axis=1) > 0
-
-                    out_coeffs = np.zeros(self.stacked_A.shape[0])
-
-                    # Transpose the template array
-                    stacked_Ax = self.stacked_A[ok_temp].T
-
-                    stacked_Ax *= sivarf_masked[:, np.newaxis]
-
-                    # Change the max iters and tolerance for the final iteration
-                    if TWO_STAGE and (iteration == iterations[-1]):
-                        log_with_offset("Final iteration", curr_line=curr_line)
-                        _nnls_i = nnls_iters[1]
-                        _nnls_t = nnls_tol[1]
-                    else:
-                        _nnls_i = nnls_iters[0]
-                        _nnls_t = nnls_tol[0]
-
-                    log_with_offset("NNLS fitting...         ", curr_line=curr_line)
-
-                    # Three different methods of fitting, each with different call
-                    # signatures and return values
-                    if nnls_method == "adelie" and HAS_ADELIE:
-
-                        state = adelie.solver.bvls(
-                            stacked_Ax,
-                            y,
-                            lower=np.zeros(stacked_Ax.shape[-1], dtype=float_dtype),
-                            upper=np.full(
-                                stacked_Ax.shape[-1], np.inf, dtype=float_dtype
-                            ),
-                            max_iters=_nnls_i,
-                            tol=_nnls_t,
-                            n_threads=cpu_count,
-                        )
-                        state.solve()
-                        state_iters = deepcopy(state.iters)
-                        coeffs = deepcopy(state.beta)
-                        coeffs[: self.MB.N] -= pedestal
-                        del state
-
-                    elif nnls_method == "numba":
-
-                        nnls_solver = CDNNLS(stacked_Ax, y)
-                        nnls_solver.run(n_iter=_nnls_i, epsilon=_nnls_t)
-                        coeffs = nnls_solver.w
-                        coeffs[: self.MB.N] -= pedestal
-
-                    elif nnls_method == "fnnls":
-                        coeffs = fnnls(
-                            stacked_Ax,
-                            y,
-                            tolerance=_nnls_t,
-                            max_iterations=_nnls_i,
-                        )
-                        coeffs[: self.MB.N] -= pedestal
-
-                    elif nnls_method == "fennls":
-                        coeffs = fennls(
-                            stacked_Ax,
-                            y,
-                            tolerance=_nnls_t,
-                            max_iterations=_nnls_i,
-                        )
-                        coeffs[: self.MB.N] -= pedestal
-                    else:
-
-                        coeffs, rnorm, info = scipy.optimize._nnls._nnls(
-                            stacked_Ax, y, _nnls_i
-                        )
-                        coeffs[: self.MB.N] -= pedestal
-
-                    t2 = time()
-                    log_with_offset(
-                        LINE_UP + f"NNLS fitting...         DONE in {t2-t1:.3f}s",
-                        curr_line=curr_line,
+                elif nnls_method == "fennls":
+                    coeffs = fennls(
+                        stacked_Ax,
+                        y,
+                        tolerance=_nnls_t,
+                        max_iterations=_nnls_i,
                     )
+                    coeffs[: self.MB.N] -= pedestal
+                else:
 
-                    out_coeffs[ok_temp] = coeffs
-                    stacked_modelf = np.dot(out_coeffs, self.stacked_A)
-                    chi2 = np.nansum(
-                        (
-                            self.MB.weightf[self.MB.fit_mask]
-                            * (self.MB.scif[self.MB.fit_mask] - stacked_modelf) ** 2
-                            * self.MB.ivarf[self.MB.fit_mask]
-                        )
+                    coeffs, rnorm, info = scipy.optimize._nnls._nnls(
+                        stacked_Ax, y, _nnls_i
                     )
-                    output_table[iteration] = [
-                        iteration,
-                        chi2,
-                        _nnls_i,
-                        state_iters if (nnls_method == "adelie" and HAS_ADELIE) else 0,
-                        _nnls_t,
-                        model_seeds,
-                        id_shifts,
-                        n_shifted_samples,
-                        t2 - t1,
-                        time() - t0,
-                        ok_temp.sum(),
-                        *out_coeffs[: self.temp_offset],
-                        *out_coeffs[self.temp_offset :].reshape(self.n_regions, -1),
-                    ]
+                    coeffs[: self.MB.N] -= pedestal
 
-                    output_table.write(self.output_table_path, overwrite=True)
-                    log_with_offset(
-                        f"Iteration {iteration}: chi2={chi2:.3f}", curr_line=curr_line
+                t2 = time()
+                log_with_offset(
+                    LINE_UP + f"NNLS fitting...         DONE in {t2-t1:.3f}s",
+                    curr_line=curr_line,
+                )
+
+                out_coeffs[ok_temp] = coeffs
+                stacked_modelf = np.dot(out_coeffs, self.stacked_A)
+                chi2 = np.nansum(
+                    (
+                        self.MB.weightf[self.MB.fit_mask]
+                        * (self.MB.scif[self.MB.fit_mask] - stacked_modelf) ** 2
+                        * self.MB.ivarf[self.MB.fit_mask]
                     )
+                )
+                output_table[iteration] = [
+                    iteration,
+                    chi2,
+                    _nnls_i,
+                    state_iters if (nnls_method == "adelie" and HAS_ADELIE) else 0,
+                    _nnls_t,
+                    model_seeds,
+                    id_shifts,
+                    n_shifted_samples,
+                    t2 - t1,
+                    time() - t0,
+                    ok_temp.sum(),
+                    *out_coeffs[: self.temp_offset],
+                    *out_coeffs[self.temp_offset :].reshape(self.n_regions, -1),
+                ]
 
-                    # Reset the template arrays
-                    self.stacked_A[self.temp_offset :].fill(0.0)
-                    self.model_spectra_arr.fill(0.0)
+                output_table.write(self.output_table_path, overwrite=True)
+                log_with_offset(
+                    f"Iteration {iteration}: chi2={chi2:.3f}", curr_line=curr_line
+                )
 
-                del stacked_Ax
+                # Reset the template arrays
+                self.stacked_A[self.temp_offset :].fill(0.0)
+                self.model_spectra_arr.fill(0.0)
+
+            del stacked_Ax
 
         # There must be a better way to obtain the coefficients, but
         # slicing tables is not entirely straightforward
@@ -1293,17 +1280,169 @@ class MultiRegionFit:
 
         # Refill array with best model
         print("Calculating covariance array...")
-        with multiprocessing.Pool(
-            processes=cpu_count,
-            initializer=init_forward_model,
-            initargs=(
-                self.shm_model_spectra.name,
-                self.model_spectra_arr.shape,
-                self.shm_stacked_A.name,
-                self.stacked_A.shape,
-                self.MB,
-            ),
-        ) as forward_model_pool:
+        # shm_model_spectra_name, model_spectra_arr.shape = (
+        self.template_sampler.gen_all_spectra_from_seeds(
+            model_seeds=self.best_model_seeds,
+            extra_region_idxs=self.best_id_shifts,
+            n_extra_samples=n_shifted_samples,
+            shared_memory_manger=self.smm,
+            shared_memory_name=self.shm_model_spectra.name,
+            shared_memory_shape=self.model_spectra_arr.shape,
+        )
+        # )
+
+        self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+
+        ok_temp = (np.sum(self.stacked_A, axis=1) > 0) & (out_coeffs != 0)
+        stacked_Ax = self.stacked_A[ok_temp, :].T * 1
+        stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
+
+        try:
+            covar = grizli_utils.safe_invert(np.dot(stacked_Ax.T, stacked_Ax))
+        except:
+            N = ok_temp.sum()
+            covar = np.zeros((N, N))
+
+        covard = np.sqrt(covar.diagonal())
+
+        coeffs_errs = out_coeffs * 0.0
+        coeffs_errs[ok_temp] = covard
+
+        chi2nu = output_table["chi2"][best_iter] / (
+            self.MB.DoF - output_table["unique_temp"][best_iter]
+        )
+
+        # Ensure that the array is cleaned before repopulating
+        self.stacked_A[self.temp_offset :].fill(0.0)
+
+        # Largely unmodified from the original grizli code. Included within
+        # this particular class method to avoid dealing with SharedMemory
+        # if save_stacks:
+        print("Generating models...")
+
+        self.template_sampler.gen_all_spectra_from_seeds(
+            model_seeds=self.best_model_seeds,
+            extra_region_idxs=self.best_id_shifts,
+            n_extra_samples=n_shifted_samples,
+            shared_memory_manger=self.smm,
+            shared_memory_name=self.shm_model_spectra.name,
+            shared_memory_shape=self.model_spectra_arr.shape,
+        )
+
+        self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+
+        masked_modelf = np.dot(out_coeffs, self.stacked_A)
+
+        self.stacked_A[self.temp_offset :].fill(0.0)
+
+        print("Generating nebular lines...")
+        self.template_sampler.gen_emline_spectra(emline=None)
+
+        full_temp_arr = deepcopy(self.model_spectra_arr)
+        self.model_spectra_arr[:] = self.template_sampler.model_emline_spectra.reshape(
+            self.model_spectra_arr.shape
+        )
+
+        self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+
+        masked_nebularf = np.dot(out_coeffs, self.stacked_A)
+
+        masked_contf = masked_modelf - masked_nebularf
+
+        self.model_spectra_arr[:] = full_temp_arr[:]
+        del full_temp_arr
+
+        # Reset the forward model array
+        self.stacked_A[self.temp_offset :].fill(0.0)
+
+        # Reconstruct the full flattened arrays without the fit mask
+        full_modelf = np.zeros_like(self.MB.scif)
+        full_modelf[self.MB.fit_mask] = masked_modelf
+
+        full_nebularf = np.zeros_like(self.MB.scif)
+        full_nebularf[self.MB.fit_mask] = masked_nebularf
+
+        full_contf = np.zeros_like(self.MB.scif)
+        full_contf[self.MB.fit_mask] = masked_contf
+
+        # Create the FITS file
+        stacked_hdul = fits.HDUList(fits.PrimaryHDU())
+
+        for ib, shape in enumerate(self.MB.shapes):
+
+            slice_beam = self.MB.idf == ib
+
+            hdus = [
+                fits.ImageHDU(
+                    data=self.MB.scif[slice_beam].reshape(shape),
+                    name="SCI",
+                ),
+                fits.ImageHDU(
+                    data=self.MB.weightf[slice_beam].reshape(shape),
+                    name="WHT",
+                ),
+                fits.ImageHDU(
+                    data=self.MB.ivarf[slice_beam].reshape(shape),
+                    name="IVAR",
+                ),
+                fits.ImageHDU(
+                    data=self.MB.fit_mask[slice_beam].reshape(shape) * 1.0,
+                    name="MASK",
+                ),
+                fits.ImageHDU(
+                    data=full_modelf[slice_beam].reshape(shape),
+                    name="MODEL",
+                ),
+                fits.ImageHDU(
+                    data=full_contf[slice_beam].reshape(shape),
+                    name="CONT",
+                ),
+                fits.ImageHDU(
+                    data=full_nebularf[slice_beam].reshape(shape),
+                    name="NEB",
+                ),
+            ]
+            for h in hdus:
+                k = f"{self.MB.beams[0].grism.pupil}-{self.MB.beams[0].grism.filter}"
+                h.header["EXTVER"] = ib
+                h.header["RA"] = (self.ra, "Right ascension")
+                h.header["DEC"] = (self.dec, "Declination")
+                h.header["GRISM"] = (k.split("-")[0], "Grism")
+                h.header["CONF"] = (
+                    self.MB.beams[0].beam.conf.conf_file,
+                    "Configuration file",
+                )
+                h.header["REDSHIFT"] = (z, "Redshift used")
+                h.header["CHI2"] = (
+                    output_table["chi2"][best_iter],
+                    "Chi^2 statistic",
+                )
+                h.header["DOF"] = (
+                    self.MB.DoF,
+                    "Degrees of freedom (active pixels)",
+                )
+                h.header["NTEMP"] = (
+                    output_table["unique_temp"][best_iter],
+                    "Number of unique templates",
+                )
+                h.header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
+                h.header = self.add_pipes_info(h.header)
+            stacked_hdul.extend(hdus)
+
+        stacked_hdul.writeto(
+            multireg_out_dir / f"regions_{self.obj_id:05d}_z_{z}_stacked.fits",
+            output_verify="silentfix",
+            overwrite=True,
+        )
+
+        # def gen_line_maps(
+        #     self,
+        # ):
+
+        if save_lines:
+            line_hdu = None
+            saved_lines = []
+
             # shm_model_spectra_name, model_spectra_arr.shape = (
             self.template_sampler.gen_all_spectra_from_seeds(
                 model_seeds=self.best_model_seeds,
@@ -1315,382 +1454,204 @@ class MultiRegionFit:
             )
             # )
 
-            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+            self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            ok_temp = (np.sum(self.stacked_A, axis=1) > 0) & (out_coeffs != 0)
-            stacked_Ax = self.stacked_A[ok_temp, :].T * 1
-            stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
-
-            try:
-                covar = grizli_utils.safe_invert(np.dot(stacked_Ax.T, stacked_Ax))
-            except:
-                N = ok_temp.sum()
-                covar = np.zeros((N, N))
-
-            covard = np.sqrt(covar.diagonal())
-
-            coeffs_errs = out_coeffs * 0.0
-            coeffs_errs[ok_temp] = covard
-
-            chi2nu = output_table["chi2"][best_iter] / (
-                self.MB.DoF - output_table["unique_temp"][best_iter]
+            masked_modelf = np.dot(
+                out_coeffs[self.temp_offset :], self.stacked_A[self.temp_offset :]
             )
 
-            # Ensure that the array is cleaned before repopulating
-            self.stacked_A[self.temp_offset :].fill(0.0)
-
-            # Largely unmodified from the original grizli code. Included within
-            # this particular class method to avoid dealing with SharedMemory
-            # if save_stacks:
-            print("Generating models...")
-
-            self.template_sampler.gen_all_spectra_from_seeds(
-                model_seeds=self.best_model_seeds,
-                extra_region_idxs=self.best_id_shifts,
-                n_extra_samples=n_shifted_samples,
-                shared_memory_manger=self.smm,
-                shared_memory_name=self.shm_model_spectra.name,
-                shared_memory_shape=self.model_spectra_arr.shape,
-            )
-
-            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
-
-            masked_modelf = np.dot(out_coeffs, self.stacked_A)
-
-            self.stacked_A[self.temp_offset :].fill(0.0)
-
-            print("Generating nebular lines...")
-            self.template_sampler.gen_emline_spectra(emline=None)
-
-            full_temp_arr = deepcopy(self.model_spectra_arr)
-            self.model_spectra_arr[:] = (
-                self.template_sampler.model_emline_spectra.reshape(
-                    self.model_spectra_arr.shape
-                )
-            )
-
-            forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
-
-            masked_nebularf = np.dot(out_coeffs, self.stacked_A)
-
-            masked_contf = masked_modelf - masked_nebularf
-
-            self.model_spectra_arr[:] = full_temp_arr[:]
-            del full_temp_arr
-
-            # Reset the forward model array
-            self.stacked_A[self.temp_offset :].fill(0.0)
-
-            # Reconstruct the full flattened arrays without the fit mask
             full_modelf = np.zeros_like(self.MB.scif)
             full_modelf[self.MB.fit_mask] = masked_modelf
 
-            full_nebularf = np.zeros_like(self.MB.scif)
-            full_nebularf[self.MB.fit_mask] = masked_nebularf
+            self.stacked_A[self.temp_offset :].fill(0.0)
 
-            full_contf = np.zeros_like(self.MB.scif)
-            full_contf[self.MB.fit_mask] = masked_contf
+            for l_i, l_v in enumerate(use_lines):
 
-            # Create the FITS file
-            stacked_hdul = fits.HDUList(fits.PrimaryHDU())
+                if not check_coverage(l_v["wave"] * (1 + z)):
+                    continue
 
-            for ib, shape in enumerate(self.MB.shapes):
+                print(f"Generating map for {l_v["grizli"]}...")
+                # print("Generating nebular lines...")
+                self.template_sampler.gen_emline_spectra(emline=l_v["cloudy"])
 
-                slice_beam = self.MB.idf == ib
+                self.model_spectra_arr[:].fill(0.0)
 
-                hdus = [
-                    fits.ImageHDU(
-                        data=self.MB.scif[slice_beam].reshape(shape),
-                        name="SCI",
-                    ),
-                    fits.ImageHDU(
-                        data=self.MB.weightf[slice_beam].reshape(shape),
-                        name="WHT",
-                    ),
-                    fits.ImageHDU(
-                        data=self.MB.ivarf[slice_beam].reshape(shape),
-                        name="IVAR",
-                    ),
-                    fits.ImageHDU(
-                        data=self.MB.fit_mask[slice_beam].reshape(shape) * 1.0,
-                        name="MASK",
-                    ),
-                    fits.ImageHDU(
-                        data=full_modelf[slice_beam].reshape(shape),
-                        name="MODEL",
-                    ),
-                    fits.ImageHDU(
-                        data=full_contf[slice_beam].reshape(shape),
-                        name="CONT",
-                    ),
-                    fits.ImageHDU(
-                        data=full_nebularf[slice_beam].reshape(shape),
-                        name="NEB",
-                    ),
-                ]
-                for h in hdus:
-                    k = f"{self.MB.beams[0].grism.pupil}-{self.MB.beams[0].grism.filter}"
-                    h.header["EXTVER"] = ib
-                    h.header["RA"] = (self.ra, "Right ascension")
-                    h.header["DEC"] = (self.dec, "Declination")
-                    h.header["GRISM"] = (k.split("-")[0], "Grism")
-                    h.header["CONF"] = (
-                        self.MB.beams[0].beam.conf.conf_file,
-                        "Configuration file",
+                # full_temp_arr = deepcopy(self.model_spectra_arr)
+                self.model_spectra_arr[:] = (
+                    self.template_sampler.model_emline_spectra.reshape(
+                        self.model_spectra_arr.shape
                     )
-                    h.header["REDSHIFT"] = (z, "Redshift used")
-                    h.header["CHI2"] = (
+                )
+
+                self.process_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
+
+                # Nebular without background fitting
+                masked_nebularf = np.dot(
+                    out_coeffs[self.temp_offset :],
+                    self.stacked_A[self.temp_offset :],
+                )
+
+                # line_sn = np.nansum(
+                #     stacked_A[self.temp_offset:] * out_coeffs[self.temp_offset:]
+                # ) / np.sqrt(
+                #     np.nansum(( stacked_A[self.temp_offset:] * coeffs_errs[self.temp_offset:]) ** 2)
+                # )
+
+                masked_contf = masked_modelf - masked_nebularf
+
+                # self.model_spectra_arr[:] = full_temp_arr[:]
+                # del full_temp_arr
+
+                # Reset the forward model array
+                self.stacked_A[self.temp_offset :].fill(0.0)
+
+                # Reconstruct the full flattened arrays without the fit mask
+                full_nebularf = np.zeros_like(self.MB.scif)
+                full_nebularf[self.MB.fit_mask] = masked_nebularf
+
+                full_contf = np.zeros_like(self.MB.scif)
+                full_contf[self.MB.fit_mask] = masked_contf
+
+                add_hdu = None
+                for continuum_temp in [True, False]:
+
+                    for ib, shape in enumerate(self.MB.shapes):
+
+                        slice_beam = self.MB.idf == ib
+                        self.MB.beams[ib].beam.model = (
+                            full_contf if continuum_temp else full_nebularf
+                        )[slice_beam].reshape(shape)
+
+                    hdu = drizzle_to_wavelength(
+                        self.MB.beams,
+                        ra=self.ra,
+                        dec=self.dec,
+                        wave=l_v["wave"] * (1 + z),
+                        fcontam=self.MB.fcontam,
+                        **pline,
+                    )
+
+                    hdu[0].header["REDSHIFT"] = (z, "Redshift used")
+                    hdu[0].header["CHI2"] = (
                         output_table["chi2"][best_iter],
                         "Chi^2 statistic",
                     )
-                    h.header["DOF"] = (
+                    hdu[0].header["DOF"] = (
                         self.MB.DoF,
                         "Degrees of freedom (active pixels)",
                     )
-                    h.header["NTEMP"] = (
+                    hdu[0].header["NTEMP"] = (
                         output_table["unique_temp"][best_iter],
                         "Number of unique templates",
                     )
-                    h.header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
-                    h.header = self.add_pipes_info(h.header)
-                stacked_hdul.extend(hdus)
+                    hdu[0].header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
+                    hdu[0].header = self.add_pipes_info(hdu[0].header)
+                    for e in [-4, -3, -2, -1]:
+                        hdu[e].header["EXTVER"] = l_v["grizli"]
+                        hdu[e].header["REDSHIFT"] = (z, "Redshift used")
+                        hdu[e].header["RESTWAVE"] = (
+                            l_v["wave"],
+                            "Line rest wavelength",
+                        )
 
-            stacked_hdul.writeto(
-                multireg_out_dir / f"regions_{self.obj_id:05d}_z_{z}_stacked.fits",
-                output_verify="silentfix",
-                overwrite=True,
-            )
+                    if add_hdu is None:
+                        add_hdu = hdu
 
-        def gen_line_maps(
-            self,
-        ):
-            line_hdu = None
-            saved_lines = []
+                        # beams_copy = [b.beam.model.copy() for b in self.MB.beams]
+                    else:
+                        hdu[-3].header["EXTNAME"] = "MODEL"
+                        add_hdu.append(hdu[-3])
+                        line_flux_i = np.nansum(hdu[-3].data) * 1e-17
+                        # line_err_i = line_flux_i / line_sn
 
-            with multiprocessing.Pool(
-                processes=cpu_count,
-                initializer=init_forward_model,
-                initargs=(
-                    self.shm_model_spectra.name,
-                    self.model_spectra_arr.shape,
-                    self.shm_stacked_A.name,
-                    self.stacked_A.shape,
-                    self.MB,
-                ),
-            ) as forward_model_pool:
-                # shm_model_spectra_name, model_spectra_arr.shape = (
-                self.template_sampler.gen_all_spectra_from_seeds(
-                    model_seeds=self.best_model_seeds,
-                    extra_region_idxs=self.best_id_shifts,
-                    n_extra_samples=n_shifted_samples,
-                    shared_memory_manger=self.smm,
-                    shared_memory_name=self.shm_model_spectra.name,
-                    shared_memory_shape=self.model_spectra_arr.shape,
+                saved_lines.append(l_v["grizli"])
+
+                if line_hdu is None:
+                    line_hdu = add_hdu
+                    line_hdu[0].header["NUMLINES"] = (
+                        1,
+                        "Number of lines in this file",
+                    )
+                else:
+                    line_hdu.extend(add_hdu[-5:])
+                    line_hdu[0].header["NUMLINES"] += 1
+
+                    # Make sure DSCI extension is filled.  Can be empty for
+                    # lines at the edge of the grism throughput
+                    for f_i in range(hdu[0].header["NDFILT"]):
+                        filt_i = hdu[0].header["DFILT{0:02d}".format(f_i + 1)]
+                        if hdu["DWHT", filt_i].data.max() != 0:
+                            line_hdu["DSCI", filt_i] = hdu["DSCI", filt_i]
+                            line_hdu["DWHT", filt_i] = hdu["DWHT", filt_i]
+
+                li = line_hdu[0].header["NUMLINES"]
+                line_hdu[0].header["LINE{0:03d}".format(li)] = l_v["grizli"]
+                line_hdu[0].header["FLUX{0:03d}".format(li)] = (
+                    line_flux_i,
+                    "Line flux, erg/s/cm2",
                 )
+                # line_hdu[0].header["ERR{0:03d}".format(li)] = (
+                #     line_err_i,
+                #     "Line flux err, erg/s/cm2",
                 # )
 
-                forward_model_pool.starmap(
-                    fwd_model_fn, enumerate(self.regions_seg_ids)
+            if line_hdu is not None:
+                line_hdu[0].header["HASLINES"] = (
+                    " ".join(saved_lines),
+                    "Lines in this file",
                 )
 
-                masked_modelf = np.dot(
-                    out_coeffs[self.temp_offset :], self.stacked_A[self.temp_offset :]
+                line_wcs = WCS(line_hdu[1].header)
+                segm = self.MB.drizzle_segmentation(wcsobj=line_wcs)
+                seg_hdu = fits.ImageHDU(data=segm.astype(np.int32), name="SEG")
+                line_hdu.insert(1, seg_hdu)
+
+                line_hdu.writeto(
+                    multireg_out_dir
+                    / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.fits",
+                    output_verify="silentfix",
+                    overwrite=True,
                 )
 
-                full_modelf = np.zeros_like(self.MB.scif)
-                full_modelf[self.MB.fit_mask] = masked_modelf
+                if "DSCI" in line_hdu:
 
-                self.stacked_A[self.temp_offset :].fill(0.0)
+                    from grizli.fitting import show_drizzled_lines
 
-                for l_i, l_v in enumerate(use_lines):
-
-                    if not check_coverage(l_v["wave"] * (1 + z)):
-                        continue
-
-                    print(f"Generating map for {l_v["grizli"]}...")
-                    # print("Generating nebular lines...")
-                    self.template_sampler.gen_emline_spectra(emline=l_v["cloudy"])
-
-                    self.model_spectra_arr[:].fill(0.0)
-
-                    # full_temp_arr = deepcopy(self.model_spectra_arr)
-                    self.model_spectra_arr[:] = (
-                        self.template_sampler.model_emline_spectra.reshape(
-                            self.model_spectra_arr.shape
-                        )
+                    # s, si = 1, line_size
+                    s = 4.0e-19 / np.max(
+                        [beam.beam.total_flux for beam in self.MB.beams]
                     )
+                    s = np.clip(s, 0.25, 4)
 
-                    forward_model_pool.starmap(
-                        fwd_model_fn, enumerate(self.regions_seg_ids)
+                    s /= (pline.get("pixscale", 0.06) / 0.1) ** 2
+
+                    scale_linemap = 1
+                    if scale_linemap < 0:
+                        s = -1
+
+                    dscale = 1.0 / 4
+
+                    fig = show_drizzled_lines(
+                        line_hdu,
+                        size_arcsec=1.6,
+                        cmap="plasma_r",
+                        scale=s * scale_linemap,
+                        dscale=s * dscale * scale_linemap,
+                        full_line_list=[
+                            "Lya",
+                            "OII",
+                            "Hb",
+                            "OIII-5007",
+                            "Ha",
+                            "SII",
+                            "SIII-9068",
+                            "SIII-9531",
+                        ],
                     )
-
-                    # Nebular without background fitting
-                    masked_nebularf = np.dot(
-                        out_coeffs[self.temp_offset :],
-                        self.stacked_A[self.temp_offset :],
-                    )
-
-                    # line_sn = np.nansum(
-                    #     stacked_A[self.temp_offset:] * out_coeffs[self.temp_offset:]
-                    # ) / np.sqrt(
-                    #     np.nansum(( stacked_A[self.temp_offset:] * coeffs_errs[self.temp_offset:]) ** 2)
-                    # )
-
-                    masked_contf = masked_modelf - masked_nebularf
-
-                    # self.model_spectra_arr[:] = full_temp_arr[:]
-                    # del full_temp_arr
-
-                    # Reset the forward model array
-                    self.stacked_A[self.temp_offset :].fill(0.0)
-
-                    # Reconstruct the full flattened arrays without the fit mask
-                    full_nebularf = np.zeros_like(self.MB.scif)
-                    full_nebularf[self.MB.fit_mask] = masked_nebularf
-
-                    full_contf = np.zeros_like(self.MB.scif)
-                    full_contf[self.MB.fit_mask] = masked_contf
-
-                    add_hdu = None
-                    for continuum_temp in [True, False]:
-
-                        for ib, shape in enumerate(self.MB.shapes):
-
-                            slice_beam = self.MB.idf == ib
-                            self.MB.beams[ib].beam.model = (
-                                full_contf if continuum_temp else full_nebularf
-                            )[slice_beam].reshape(shape)
-
-                        hdu = drizzle_to_wavelength(
-                            self.MB.beams,
-                            ra=self.ra,
-                            dec=self.dec,
-                            wave=l_v["wave"] * (1 + z),
-                            fcontam=self.MB.fcontam,
-                            **pline,
-                        )
-
-                        hdu[0].header["REDSHIFT"] = (z, "Redshift used")
-                        hdu[0].header["CHI2"] = (
-                            output_table["chi2"][best_iter],
-                            "Chi^2 statistic",
-                        )
-                        hdu[0].header["DOF"] = (
-                            self.MB.DoF,
-                            "Degrees of freedom (active pixels)",
-                        )
-                        hdu[0].header["NTEMP"] = (
-                            output_table["unique_temp"][best_iter],
-                            "Number of unique templates",
-                        )
-                        hdu[0].header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
-                        hdu[0].header = self.add_pipes_info(hdu[0].header)
-                        for e in [-4, -3, -2, -1]:
-                            hdu[e].header["EXTVER"] = l_v["grizli"]
-                            hdu[e].header["REDSHIFT"] = (z, "Redshift used")
-                            hdu[e].header["RESTWAVE"] = (
-                                l_v["wave"],
-                                "Line rest wavelength",
-                            )
-
-                        if add_hdu is None:
-                            add_hdu = hdu
-
-                            # beams_copy = [b.beam.model.copy() for b in self.MB.beams]
-                        else:
-                            hdu[-3].header["EXTNAME"] = "MODEL"
-                            add_hdu.append(hdu[-3])
-                            line_flux_i = np.nansum(hdu[-3].data) * 1e-17
-                            # line_err_i = line_flux_i / line_sn
-
-                    saved_lines.append(l_v["grizli"])
-
-                    if line_hdu is None:
-                        line_hdu = add_hdu
-                        line_hdu[0].header["NUMLINES"] = (
-                            1,
-                            "Number of lines in this file",
-                        )
-                    else:
-                        line_hdu.extend(add_hdu[-5:])
-                        line_hdu[0].header["NUMLINES"] += 1
-
-                        # Make sure DSCI extension is filled.  Can be empty for
-                        # lines at the edge of the grism throughput
-                        for f_i in range(hdu[0].header["NDFILT"]):
-                            filt_i = hdu[0].header["DFILT{0:02d}".format(f_i + 1)]
-                            if hdu["DWHT", filt_i].data.max() != 0:
-                                line_hdu["DSCI", filt_i] = hdu["DSCI", filt_i]
-                                line_hdu["DWHT", filt_i] = hdu["DWHT", filt_i]
-
-                    li = line_hdu[0].header["NUMLINES"]
-                    line_hdu[0].header["LINE{0:03d}".format(li)] = l_v["grizli"]
-                    line_hdu[0].header["FLUX{0:03d}".format(li)] = (
-                        line_flux_i,
-                        "Line flux, erg/s/cm2",
-                    )
-                    # line_hdu[0].header["ERR{0:03d}".format(li)] = (
-                    #     line_err_i,
-                    #     "Line flux err, erg/s/cm2",
-                    # )
-
-                if line_hdu is not None:
-                    line_hdu[0].header["HASLINES"] = (
-                        " ".join(saved_lines),
-                        "Lines in this file",
-                    )
-
-                    line_wcs = WCS(line_hdu[1].header)
-                    segm = self.MB.drizzle_segmentation(wcsobj=line_wcs)
-                    seg_hdu = fits.ImageHDU(data=segm.astype(np.int32), name="SEG")
-                    line_hdu.insert(1, seg_hdu)
-
-                    line_hdu.writeto(
+                    fig.savefig(
                         multireg_out_dir
-                        / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.fits",
-                        output_verify="silentfix",
-                        overwrite=True,
+                        / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.png",
                     )
-
-                    if "DSCI" in line_hdu:
-
-                        from grizli.fitting import show_drizzled_lines
-
-                        # s, si = 1, line_size
-                        s = 4.0e-19 / np.max(
-                            [beam.beam.total_flux for beam in self.MB.beams]
-                        )
-                        s = np.clip(s, 0.25, 4)
-
-                        s /= (pline.get("pixscale", 0.06) / 0.1) ** 2
-
-                        scale_linemap = 1
-                        if scale_linemap < 0:
-                            s = -1
-
-                        dscale = 1.0 / 4
-
-                        fig = show_drizzled_lines(
-                            line_hdu,
-                            size_arcsec=1.6,
-                            cmap="plasma_r",
-                            scale=s * scale_linemap,
-                            dscale=s * dscale * scale_linemap,
-                            full_line_list=[
-                                "Lya",
-                                "OII",
-                                "Hb",
-                                "OIII-5007",
-                                "Ha",
-                                "SII",
-                                "SIII-9068",
-                                "SIII-9531",
-                            ],
-                        )
-                        fig.savefig(
-                            multireg_out_dir
-                            / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.png",
-                        )
 
         return
 
@@ -1699,14 +1660,61 @@ class MultiRegionFit:
 
     def __del__(self):
         """
-        Ensure that the `SharedMemoryManager` is shut down correctly.
+        Ensure that all attributes are correctly destroyed.
         """
+
+        if hasattr(self, "template_sampler"):
+            self.template_sampler.close()
+            del self.template_sampler
+
+        if hasattr(self, "_process_pool"):
+            self._process_pool.close()
+            self._process_pool.terminate()
+            del self._process_pool
+
         if hasattr(self, "smm"):
             self.smm.shutdown()
             del self.smm
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.__del__()
+
+    def initialise_process_pool(self, cpu_count: int):
+        """
+        Initialise a pool of processes.
+
+        This is stored as a class attribute, to reduce the overhead of
+        creating this each time it is needed.
+
+        Parameters
+        ----------
+        cpu_count : int
+            The number of processes to create.
+        """
+
+        self._process_pool = multiprocessing.Pool(
+            processes=cpu_count,
+            initializer=init_forward_model,
+            initargs=(
+                self.shm_model_spectra.name,
+                self.model_spectra_arr.shape,
+                self.shm_stacked_A.name,
+                self.stacked_A.shape,
+                self.MB,
+            ),
+        )
+
+    @property
+    def process_pool(self) -> multiprocessing.Pool():
+        """The pool of workers for all multiprocessing (`~multiprocessing.Pool`, read-only)."""
+        return self._process_pool
+
+    @process_pool.setter
+    def process_pool(self, value: None = None):  # numpydoc ignore=GL08
+        raise AttributeError(
+            "`self.process_pool` cannot be set directly. Initialise this "
+            "attribute using `self.initialise_process_pool(cpu_count)` instead."
+        )
 
     def initialise_shared_memory(self, n_spec_per_region: int, memmap: bool = False):
 
