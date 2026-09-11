@@ -1484,249 +1484,284 @@ class MultiRegionFit:
                 overwrite=True,
             )
 
-        # if save_lines:
-        #     beam_models_len = 0
-        #     for k_i, (k, v) in enumerate(beam_info.items()):
-        #         beam_models_len += np.prod(v["2d_shape"]) * len(v["list_idx"])
+        if save_lines:
+            # beam_models_len = 0
+            # for k_i, (k, v) in enumerate(beam_info.items()):
+            #     beam_models_len += np.prod(v["2d_shape"]) * len(v["list_idx"])
 
-        #     if memmap:
-        #         flat_beam_models = np.memmap(
-        #             temp_dir / "memmap_beams_model.dat",
-        #             dtype=float_dtype,
-        #             mode="w+",
-        #             shape=(beam_models_len),
-        #         )
-        #     else:
+            # if memmap:
+            #     flat_beam_models = np.memmap(
+            #         temp_dir / "memmap_beams_model.dat",
+            #         dtype=float_dtype,
+            #         mode="w+",
+            #         shape=(beam_models_len),
+            #     )
+            # else:
 
-        #         shm_beam_models = self.smm.SharedMemory(
-        #             size=np.dtype(float_dtype).itemsize * beam_models_len
-        #         )
-        #         flat_beam_models = np.ndarray(
-        #             (beam_models_len),
-        #             dtype=float_dtype,
-        #             buffer=shm_beam_models.buf,
-        #         )
+            #     shm_beam_models = self.smm.SharedMemory(
+            #         size=np.dtype(float_dtype).itemsize * beam_models_len
+            #     )
+            #     flat_beam_models = np.ndarray(
+            #         (beam_models_len),
+            #         dtype=float_dtype,
+            #         buffer=shm_beam_models.buf,
+            #     )
 
-        #     line_hdu = None
-        #     saved_lines = []
+            line_hdu = None
+            saved_lines = []
 
-        #     beams_fn = partial(
-        #         self._gen_beam_templates_from_pipes,
-        #         shared_seg_name=(
-        #             temp_dir / "memmap_oversamp_seg_maps.dat"
-        #             if memmap
-        #             else shm_seg_maps.name
-        #         ),
-        #         seg_maps_shape=oversamp_seg_maps_shape,
-        #         shared_models_name=(
-        #             temp_dir / "memmap_beams_model.dat"
-        #             if memmap
-        #             else shm_beam_models.name
-        #         ),
-        #         models_shape=flat_beam_models.shape,
-        #         posterior_dir=str(self.pipes_dir / "posterior" / self.run_name),
-        #         spec_wavs=spec_wavs,
-        #         beam_info=beam_info,
-        #         cont_only=False,
-        #         model_seeds=best_model_seeds,
-        #         coeffs=output_table[best_iter],
-        #         memmap=memmap,
-        #         n_shifted_model_seeds=n_shifted_samples,
-        #         return_line_flux=True,
-        #     )
+            # beams_fn = partial(
+            #     self._gen_beam_templates_from_pipes,
+            #     shared_seg_name=(
+            #         temp_dir / "memmap_oversamp_seg_maps.dat"
+            #         if memmap
+            #         else shm_seg_maps.name
+            #     ),
+            #     seg_maps_shape=oversamp_seg_maps_shape,
+            #     shared_models_name=(
+            #         temp_dir / "memmap_beams_model.dat"
+            #         if memmap
+            #         else shm_beam_models.name
+            #     ),
+            #     models_shape=flat_beam_models.shape,
+            #     posterior_dir=str(self.pipes_dir / "posterior" / self.run_name),
+            #     spec_wavs=spec_wavs,
+            #     beam_info=beam_info,
+            #     cont_only=False,
+            #     model_seeds=best_model_seeds,
+            #     coeffs=output_table[best_iter],
+            #     memmap=memmap,
+            #     n_shifted_model_seeds=n_shifted_samples,
+            #     return_line_flux=True,
+            # )
 
-        #     lock = Lock()
+            # lock = Lock()
 
-        #     for l_i, l_v in enumerate(use_lines):
+            with multiprocessing.Pool(
+                processes=cpu_count,
+                initializer=init_forward_model,
+                initargs=(
+                    self.shm_model_spectra.name,
+                    self.model_spectra_arr.shape,
+                    shm_stacked_A.name,
+                    stacked_A_shape,
+                    self.MB,
+                ),
+            ) as forward_model_pool:
+                # shm_model_spectra_name, model_spectra_arr.shape = (
+                self.template_sampler.gen_all_spectra_from_seeds(
+                    model_seeds=self.best_model_seeds,
+                    extra_region_idxs=self.best_id_shifts,
+                    n_extra_samples=n_shifted_samples,
+                    shared_memory_manger=self.smm,
+                    shared_memory_name=self.shm_model_spectra.name,
+                    shared_memory_shape=self.model_spectra_arr.shape,
+                )
+                # )
 
-        #         if not check_coverage(l_v["wave"] * (1 + z)):
-        #             continue
+                forward_model_pool.starmap(
+                    fwd_model_fn, enumerate(self.regions_seg_ids)
+                )
 
-        #         print(f"Generating map for {l_v["grizli"]}...")
+                masked_modelf = np.dot(
+                    out_coeffs[temp_offset:], stacked_A[temp_offset:]
+                )
 
-        #         add_hdu = None
-        #         for continuum_temp in [True, False]:
+                full_modelf = np.zeros_like(self.MB.scif)
+                full_modelf[self.MB.fit_mask] = masked_modelf
 
-        #             flat_beam_models.fill(0.0)
+                stacked_A[temp_offset:].fill(0.0)
 
-        #             results = [None] * self.n_regions
+                for l_i, l_v in enumerate(use_lines):
 
-        #             with multiprocessing.Pool(
-        #                 processes=cpu_count,
-        #                 initializer=_init_pipes_sampler,
-        #                 initargs=(fit_instructions, veldisp, self.MB.beams, lock),
-        #             ) as pool:
-        #                 for s_i, s in enumerate(self.regions_phot_cat["bin_id"]):
-        #                     results[s_i] = pool.apply_async(
-        #                         beams_fn,
-        #                         args=(s_i, s),
-        #                         kwds={
-        #                             "rm_line": (
-        #                                 l_v["cloudy"] if continuum_temp else None
-        #                             ),
-        #                             "id_shifts": best_id_shifts,
-        #                         },
-        #                         error_callback=print,
-        #                     )
+                    if not check_coverage(l_v["wave"] * (1 + z)):
+                        continue
 
-        #                 results = np.asarray([r.get() for r in results]).ravel()
+                    print(f"Generating map for {l_v["grizli"]}...")
+                    # print("Generating nebular lines...")
+                    self.template_sampler.gen_emline_spectra(emline=l_v["cloudy"])
 
-        #                 pool.close()
-        #                 pool.join()
+                    self.model_spectra_arr[:].fill(0.0)
 
-        #             i0 = 0
-        #             start_idx = 0
-        #             for k_i, (k, v) in enumerate(beam_info.items()):
-        #                 for ib in v["list_idx"]:
-        #                     self.MB.beams[ib].beam.model = flat_beam_models[
-        #                         i0 : i0 + np.prod(v["2d_shape"])
-        #                     ].reshape(v["2d_shape"])
-        #                     i0 += np.prod(v["2d_shape"])
-        #                 start_idx += np.prod(v["2d_shape"])
+                    # full_temp_arr = deepcopy(self.model_spectra_arr)
+                    self.model_spectra_arr[:] = (
+                        self.template_sampler.model_emline_spectra.reshape(
+                            self.model_spectra_arr.shape
+                        )
+                    )
 
-        #             if not continuum_temp:
-        #                 for b_i, (b, b_old) in enumerate(
-        #                     zip(self.MB.beams, beams_copy)
-        #                 ):
-        #                     self.MB.beams[b_i].beam.model -= b_old
+                    forward_model_pool.starmap(
+                        fwd_model_fn, enumerate(self.regions_seg_ids)
+                    )
 
-        #             hdu = drizzle_to_wavelength(
-        #                 self.MB.beams,
-        #                 ra=self.ra,
-        #                 dec=self.dec,
-        #                 wave=l_v["wave"] * (1 + z),
-        #                 fcontam=self.MB.fcontam,
-        #                 **pline,
-        #             )
+                    # Nebular without background fitting
+                    masked_nebularf = np.dot(
+                        out_coeffs[temp_offset:], stacked_A[temp_offset:]
+                    )
 
-        #             hdu[0].header["REDSHIFT"] = (z, "Redshift used")
-        #             hdu[0].header["CHI2"] = (
-        #                 output_table["chi2"][best_iter],
-        #                 "Chi^2 statistic",
-        #             )
-        #             hdu[0].header["DOF"] = (
-        #                 self.MB.DoF,
-        #                 "Degrees of freedom (active pixels)",
-        #             )
-        #             hdu[0].header["NTEMP"] = (
-        #                 output_table["unique_temp"][best_iter],
-        #                 "Number of unique templates",
-        #             )
-        #             hdu[0].header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
-        #             hdu[0].header = self.add_pipes_info(hdu[0].header)
-        #             for e in [-4, -3, -2, -1]:
-        #                 hdu[e].header["EXTVER"] = l_v["grizli"]
-        #                 hdu[e].header["REDSHIFT"] = (z, "Redshift used")
-        #                 hdu[e].header["RESTWAVE"] = (
-        #                     l_v["wave"],
-        #                     "Line rest wavelength",
-        #                 )
+                    # line_sn = np.nansum(
+                    #     stacked_A[temp_offset:] * out_coeffs[temp_offset:]
+                    # ) / np.sqrt(
+                    #     np.nansum(( stacked_A[temp_offset:] * coeffs_errs[temp_offset:]) ** 2)
+                    # )
 
-        #             if add_hdu is None:
-        #                 add_hdu = hdu
+                    masked_contf = masked_modelf - masked_nebularf
 
-        #                 beams_copy = [b.beam.model.copy() for b in self.MB.beams]
-        #                 line_sn = np.nansum(
-        #                     results * out_coeffs[temp_offset:]
-        #                 ) / np.sqrt(
-        #                     np.nansum((results * coeffs_errs[temp_offset:]) ** 2)
-        #                 )
-        #             else:
-        #                 hdu[-3].header["EXTNAME"] = "MODEL"
-        #                 add_hdu.append(hdu[-3])
-        #                 line_flux_i = np.nansum(hdu[-3].data) * 1e-17
-        #                 line_err_i = line_flux_i / line_sn
+                    # self.model_spectra_arr[:] = full_temp_arr[:]
+                    # del full_temp_arr
 
-        #         saved_lines.append(l_v["grizli"])
+                    # Reset the forward model array
+                    stacked_A[temp_offset:].fill(0.0)
 
-        #         if line_hdu is None:
-        #             line_hdu = add_hdu
-        #             line_hdu[0].header["NUMLINES"] = (
-        #                 1,
-        #                 "Number of lines in this file",
-        #             )
-        #         else:
-        #             line_hdu.extend(add_hdu[-5:])
-        #             line_hdu[0].header["NUMLINES"] += 1
+                    # Reconstruct the full flattened arrays without the fit mask
+                    full_nebularf = np.zeros_like(self.MB.scif)
+                    full_nebularf[self.MB.fit_mask] = masked_nebularf
 
-        #             # Make sure DSCI extension is filled.  Can be empty for
-        #             # lines at the edge of the grism throughput
-        #             for f_i in range(hdu[0].header["NDFILT"]):
-        #                 filt_i = hdu[0].header["DFILT{0:02d}".format(f_i + 1)]
-        #                 if hdu["DWHT", filt_i].data.max() != 0:
-        #                     line_hdu["DSCI", filt_i] = hdu["DSCI", filt_i]
-        #                     line_hdu["DWHT", filt_i] = hdu["DWHT", filt_i]
+                    full_contf = np.zeros_like(self.MB.scif)
+                    full_contf[self.MB.fit_mask] = masked_contf
 
-        #         li = line_hdu[0].header["NUMLINES"]
-        #         line_hdu[0].header["LINE{0:03d}".format(li)] = l_v["grizli"]
-        #         line_hdu[0].header["FLUX{0:03d}".format(li)] = (
-        #             line_flux_i,
-        #             "Line flux, erg/s/cm2",
-        #         )
-        #         line_hdu[0].header["ERR{0:03d}".format(li)] = (
-        #             line_err_i,
-        #             "Line flux err, erg/s/cm2",
-        #         )
+                    add_hdu = None
+                    for continuum_temp in [True, False]:
 
-        #     if line_hdu is not None:
-        #         line_hdu[0].header["HASLINES"] = (
-        #             " ".join(saved_lines),
-        #             "Lines in this file",
-        #         )
+                        for ib, shape in enumerate(self.MB.shapes):
 
-        #         line_wcs = WCS(line_hdu[1].header)
-        #         segm = self.MB.drizzle_segmentation(wcsobj=line_wcs)
-        #         seg_hdu = fits.ImageHDU(data=segm.astype(np.int32), name="SEG")
-        #         line_hdu.insert(1, seg_hdu)
+                            slice_beam = self.MB.idf == ib
+                            self.MB.beams[ib].beam.model = (
+                                full_contf if continuum_temp else full_nebularf
+                            )[slice_beam].reshape(shape)
 
-        #         line_hdu.writeto(
-        #             multireg_out_dir
-        #             / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.fits",
-        #             output_verify="silentfix",
-        #             overwrite=True,
-        #         )
+                        hdu = drizzle_to_wavelength(
+                            self.MB.beams,
+                            ra=self.ra,
+                            dec=self.dec,
+                            wave=l_v["wave"] * (1 + z),
+                            fcontam=self.MB.fcontam,
+                            **pline,
+                        )
 
-        #         if "DSCI" in line_hdu:
+                        hdu[0].header["REDSHIFT"] = (z, "Redshift used")
+                        hdu[0].header["CHI2"] = (
+                            output_table["chi2"][best_iter],
+                            "Chi^2 statistic",
+                        )
+                        hdu[0].header["DOF"] = (
+                            self.MB.DoF,
+                            "Degrees of freedom (active pixels)",
+                        )
+                        hdu[0].header["NTEMP"] = (
+                            output_table["unique_temp"][best_iter],
+                            "Number of unique templates",
+                        )
+                        hdu[0].header["CHI2NU"] = (chi2nu, "Reduced chi^2 statistic")
+                        hdu[0].header = self.add_pipes_info(hdu[0].header)
+                        for e in [-4, -3, -2, -1]:
+                            hdu[e].header["EXTVER"] = l_v["grizli"]
+                            hdu[e].header["REDSHIFT"] = (z, "Redshift used")
+                            hdu[e].header["RESTWAVE"] = (
+                                l_v["wave"],
+                                "Line rest wavelength",
+                            )
 
-        #             from grizli.fitting import show_drizzled_lines
+                        if add_hdu is None:
+                            add_hdu = hdu
 
-        #             # s, si = 1, line_size
-        #             s = 4.0e-19 / np.max(
-        #                 [beam.beam.total_flux for beam in self.MB.beams]
-        #             )
-        #             s = np.clip(s, 0.25, 4)
+                            # beams_copy = [b.beam.model.copy() for b in self.MB.beams]
+                        else:
+                            hdu[-3].header["EXTNAME"] = "MODEL"
+                            add_hdu.append(hdu[-3])
+                            line_flux_i = np.nansum(hdu[-3].data) * 1e-17
+                            # line_err_i = line_flux_i / line_sn
 
-        #             s /= (pline.get("pixscale", 0.06) / 0.1) ** 2
+                    saved_lines.append(l_v["grizli"])
 
-        #             scale_linemap = 1
-        #             if scale_linemap < 0:
-        #                 s = -1
+                    if line_hdu is None:
+                        line_hdu = add_hdu
+                        line_hdu[0].header["NUMLINES"] = (
+                            1,
+                            "Number of lines in this file",
+                        )
+                    else:
+                        line_hdu.extend(add_hdu[-5:])
+                        line_hdu[0].header["NUMLINES"] += 1
 
-        #             dscale = 1.0 / 4
+                        # Make sure DSCI extension is filled.  Can be empty for
+                        # lines at the edge of the grism throughput
+                        for f_i in range(hdu[0].header["NDFILT"]):
+                            filt_i = hdu[0].header["DFILT{0:02d}".format(f_i + 1)]
+                            if hdu["DWHT", filt_i].data.max() != 0:
+                                line_hdu["DSCI", filt_i] = hdu["DSCI", filt_i]
+                                line_hdu["DWHT", filt_i] = hdu["DWHT", filt_i]
 
-        #             fig = show_drizzled_lines(
-        #                 line_hdu,
-        #                 size_arcsec=1.6,
-        #                 cmap="plasma_r",
-        #                 scale=s * scale_linemap,
-        #                 dscale=s * dscale * scale_linemap,
-        #                 full_line_list=[
-        #                     "Lya",
-        #                     "OII",
-        #                     "Hb",
-        #                     "OIII-5007",
-        #                     "Ha",
-        #                     "SII",
-        #                     "SIII-9068",
-        #                     "SIII-9531",
-        #                 ],
-        #             )
-        #             fig.savefig(
-        #                 multireg_out_dir
-        #                 / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.png",
-        #             )
+                    li = line_hdu[0].header["NUMLINES"]
+                    line_hdu[0].header["LINE{0:03d}".format(li)] = l_v["grizli"]
+                    line_hdu[0].header["FLUX{0:03d}".format(li)] = (
+                        line_flux_i,
+                        "Line flux, erg/s/cm2",
+                    )
+                    # line_hdu[0].header["ERR{0:03d}".format(li)] = (
+                    #     line_err_i,
+                    #     "Line flux err, erg/s/cm2",
+                    # )
 
-        # return
+                if line_hdu is not None:
+                    line_hdu[0].header["HASLINES"] = (
+                        " ".join(saved_lines),
+                        "Lines in this file",
+                    )
+
+                    line_wcs = WCS(line_hdu[1].header)
+                    segm = self.MB.drizzle_segmentation(wcsobj=line_wcs)
+                    seg_hdu = fits.ImageHDU(data=segm.astype(np.int32), name="SEG")
+                    line_hdu.insert(1, seg_hdu)
+
+                    line_hdu.writeto(
+                        multireg_out_dir
+                        / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.fits",
+                        output_verify="silentfix",
+                        overwrite=True,
+                    )
+
+                    if "DSCI" in line_hdu:
+
+                        from grizli.fitting import show_drizzled_lines
+
+                        # s, si = 1, line_size
+                        s = 4.0e-19 / np.max(
+                            [beam.beam.total_flux for beam in self.MB.beams]
+                        )
+                        s = np.clip(s, 0.25, 4)
+
+                        s /= (pline.get("pixscale", 0.06) / 0.1) ** 2
+
+                        scale_linemap = 1
+                        if scale_linemap < 0:
+                            s = -1
+
+                        dscale = 1.0 / 4
+
+                        fig = show_drizzled_lines(
+                            line_hdu,
+                            size_arcsec=1.6,
+                            cmap="plasma_r",
+                            scale=s * scale_linemap,
+                            dscale=s * dscale * scale_linemap,
+                            full_line_list=[
+                                "Lya",
+                                "OII",
+                                "Hb",
+                                "OIII-5007",
+                                "Ha",
+                                "SII",
+                                "SIII-9068",
+                                "SIII-9531",
+                            ],
+                        )
+                        fig.savefig(
+                            multireg_out_dir
+                            / f"regions_{self.obj_id:05d}_z_{z}_{pline.get("pixscale", 0.06)}arcsec.line.png",
+                        )
+
+        return
 
     def __enter__(self):
         return self
