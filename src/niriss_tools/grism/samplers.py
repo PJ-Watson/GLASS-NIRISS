@@ -154,12 +154,12 @@ class BagpipesTemplateSampler(TemplateSampler):
         self.veldisp = veldisp
         self.spec_wavs = spec_wavs
 
-        with multiprocessing.Pool(self.cpu_count) as pool:
+        self.initialise_process_pool(self.cpu_count)
 
-            params_lists = pool.map(
-                self.load_model_params,
-                [posterior_dir / f"{i}.h5" for i in self.posterior_ids],
-            )
+        params_lists = self.process_pool.map(
+            self.load_model_params,
+            [posterior_dir / f"{i}.h5" for i in self.posterior_ids],
+        )
 
         params_array = np.concatenate(params_lists, axis=0)
 
@@ -347,27 +347,21 @@ class BagpipesTemplateSampler(TemplateSampler):
                 self.all_model_line_fluxes[arr_idxs],
             )
 
-        with multiprocessing.Pool(
-            processes=self.cpu_count,
-            initializer=init_bagpipes_spec_gen,
-            initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
-        ) as pool:
-
-            spec_lists, line_flux_dicts = zip(
-                *pool.map(
-                    self.worker_gen_spec_and_fluxes,
-                    self.model_params,
-                )
+        spec_lists, line_flux_dicts = zip(
+            *self.process_pool.map(
+                self.worker_gen_spec_and_fluxes,
+                self.model_params,
             )
+        )
 
-            model_spectra = np.array(spec_lists)
-            del spec_lists
+        model_spectra = np.array(spec_lists)
+        del spec_lists
 
-            merged_line_flux_dict = {
-                k: [d.get(k, np.nan) for d in line_flux_dicts] for k in self.line_names
-            }
-            model_line_fluxes = np.array(list(merged_line_flux_dict.values())).T
-            del merged_line_flux_dict, line_flux_dicts
+        merged_line_flux_dict = {
+            k: [d.get(k, np.nan) for d in line_flux_dicts] for k in self.line_names
+        }
+        model_line_fluxes = np.array(list(merged_line_flux_dict.values())).T
+        del merged_line_flux_dict, line_flux_dicts
 
         return model_spectra, model_line_fluxes
 
@@ -482,17 +476,12 @@ class BagpipesTemplateSampler(TemplateSampler):
                 oversample=oversample
             )
 
-            with multiprocessing.Pool(
-                processes=self.cpu_count,
-            ) as pool:
-                resampled_spectra = np.array(
-                    pool.starmap(
-                        interp_conserve_c,
-                        zip(
-                            repeat(new_wavs), redshifted_wavs, convolved_line_templates
-                        ),
-                    )
+            resampled_spectra = np.array(
+                self.process_pool.starmap(
+                    interp_conserve_c,
+                    zip(repeat(new_wavs), redshifted_wavs, convolved_line_templates),
                 )
+            )
 
             redshifted_wavs = np.tile(
                 new_wavs[np.newaxis, :], (resampled_spectra.shape[0], 1)
@@ -687,6 +676,59 @@ class BagpipesTemplateSampler(TemplateSampler):
         ).astype(int)
 
         return model_seeds, extra_region_idxs
+
+    def __enter__(self):
+        return self
+
+    def __del__(self):
+        """
+        Ensure that the Pool is terminated correctly.
+        """
+
+        if hasattr(self, "process_pool"):
+            self._process_pool.close()
+            self._process_pool.terminate()
+            del self._process_pool
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.__del__()
+
+    def close(self):
+        """
+        A method to explicitly destroy the object.
+        """
+        self.__del__()
+
+    def initialise_process_pool(self, cpu_count: int):
+        """
+        Initialise a pool of processes.
+
+        This is stored as a class attribute, to reduce the overhead of
+        creating this each time it is needed.
+
+        Parameters
+        ----------
+        cpu_count : int
+            The number of processes to create.
+        """
+
+        self._process_pool = multiprocessing.Pool(
+            processes=self.cpu_count,
+            initializer=init_bagpipes_spec_gen,
+            initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
+        )
+
+    @property
+    def process_pool(self) -> multiprocessing.Pool():
+        """The pool of workers for all multiprocessing (`~multiprocessing.Pool`, read-only)."""
+        return self._process_pool
+
+    @process_pool.setter
+    def process_pool(self, value: None = None):  # numpydoc ignore=GL08
+        raise AttributeError(
+            "`self.process_pool` cannot be set directly. Initialise this "
+            "attribute using `self.initialise_process_pool(cpu_count)` instead."
+        )
 
 
 def _test_process_affinity(task_id):
