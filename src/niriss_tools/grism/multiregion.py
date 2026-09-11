@@ -973,33 +973,12 @@ class MultiRegionFit:
         if n_shifted > 0:
             NTEMP += self.n_regions * n_shifted * n_shifted_samples
 
-        temp_offset = A.shape[0]
+        # Non-template rows in A (background and polynomial components)
+        self.temp_offset = A.shape[0]
 
-        # This is the large array of models. Each row corresponds to a
-        # (probably) unique template, forward-modelled across all beams,
-        # and flattened.
-        stacked_A_shape = (temp_offset + NTEMP, self.MB.Nmask)
+        self.initialise_shared_memory(n_samples + (n_shifted * n_shifted_samples))
 
-        if memmap:
-            stacked_A = np.memmap(
-                temp_dir / "memmap_stacked_A.dat",
-                dtype=float_dtype,
-                mode="w+",
-                shape=stacked_A_shape,
-            )
-        else:
-            shm_stacked_A = self.smm.SharedMemory(
-                size=np.dtype(float_dtype).itemsize * np.prod(stacked_A_shape)
-            )
-            stacked_A = np.ndarray(
-                stacked_A_shape,
-                dtype=float_dtype,
-                buffer=shm_stacked_A.buf,
-            )
-
-        stacked_A.fill(0.0)
-
-        stacked_A[:temp_offset] = A[:, self.MB.fit_mask]
+        self.stacked_A[: self.temp_offset] = A[:, self.MB.fit_mask]
 
         # Allow for background fitting by including an offset
         if fit_background:
@@ -1025,7 +1004,7 @@ class MultiRegionFit:
         fwd_model_fn = partial(
             forward_model_independent,
             spec_wavs=self.spec_wavs,
-            temp_offset=temp_offset,
+            temp_offset=self.temp_offset,
             memmap=memmap,
         )
 
@@ -1059,7 +1038,7 @@ class MultiRegionFit:
                     np.zeros((total_iters, n_samples), dtype=int),
                     np.zeros((total_iters, n_shifted), dtype=int),
                     *np.zeros((4, total_iters)),
-                    *np.zeros((temp_offset, total_iters)),
+                    *np.zeros((self.temp_offset, total_iters)),
                     *np.zeros(
                         (
                             self.n_regions,
@@ -1069,10 +1048,10 @@ class MultiRegionFit:
                     ),
                 ],
                 names=init_col_names
-                + [f"base_coeffs_{b}" for b in np.arange(temp_offset)]
+                + [f"base_coeffs_{b}" for b in np.arange(self.temp_offset)]
                 + [f"bin_{p}" for p in self.regions_phot_cat["bin_id"]],
                 dtype=[int, float, int, int, float, int, int, int, float, float, int]
-                + [float] * temp_offset
+                + [float] * self.temp_offset
                 + [float] * self.n_regions,
             )
 
@@ -1092,8 +1071,6 @@ class MultiRegionFit:
             initial=0,
         )
 
-        self.initialise_shared_templates(n_samples + (n_shifted * n_shifted_samples))
-
         if n_prev_iters < total_iters:
 
             remaining_iters = total_iters - n_prev_iters
@@ -1110,8 +1087,8 @@ class MultiRegionFit:
                 initargs=(
                     self.shm_model_spectra.name,
                     self.model_spectra_arr.shape,
-                    shm_stacked_A.name,
-                    stacked_A_shape,
+                    self.shm_stacked_A.name,
+                    self.stacked_A.shape,
                     self.MB,
                 ),
             ) as forward_model_pool:
@@ -1175,12 +1152,12 @@ class MultiRegionFit:
                     )
 
                     # Remove any negative or zero templates
-                    ok_temp = np.sum(stacked_A, axis=1) > 0
+                    ok_temp = np.sum(self.stacked_A, axis=1) > 0
 
-                    out_coeffs = np.zeros(stacked_A.shape[0])
+                    out_coeffs = np.zeros(self.stacked_A.shape[0])
 
                     # Transpose the template array
-                    stacked_Ax = stacked_A[ok_temp].T
+                    stacked_Ax = self.stacked_A[ok_temp].T
 
                     stacked_Ax *= sivarf_masked[:, np.newaxis]
 
@@ -1254,7 +1231,7 @@ class MultiRegionFit:
                     )
 
                     out_coeffs[ok_temp] = coeffs
-                    stacked_modelf = np.dot(out_coeffs, stacked_A)
+                    stacked_modelf = np.dot(out_coeffs, self.stacked_A)
                     chi2 = np.nansum(
                         (
                             self.MB.weightf[self.MB.fit_mask]
@@ -1274,8 +1251,8 @@ class MultiRegionFit:
                         t2 - t1,
                         time() - t0,
                         ok_temp.sum(),
-                        *out_coeffs[:temp_offset],
-                        *out_coeffs[temp_offset:].reshape(self.n_regions, -1),
+                        *out_coeffs[: self.temp_offset],
+                        *out_coeffs[self.temp_offset :].reshape(self.n_regions, -1),
                     ]
 
                     output_table.write(self.output_table_path, overwrite=True)
@@ -1284,7 +1261,7 @@ class MultiRegionFit:
                     )
 
                     # Reset the template arrays
-                    stacked_A[temp_offset:].fill(0.0)
+                    self.stacked_A[self.temp_offset :].fill(0.0)
                     self.model_spectra_arr.fill(0.0)
 
                 del stacked_Ax
@@ -1322,8 +1299,8 @@ class MultiRegionFit:
             initargs=(
                 self.shm_model_spectra.name,
                 self.model_spectra_arr.shape,
-                shm_stacked_A.name,
-                stacked_A_shape,
+                self.shm_stacked_A.name,
+                self.stacked_A.shape,
                 self.MB,
             ),
         ) as forward_model_pool:
@@ -1340,8 +1317,8 @@ class MultiRegionFit:
 
             forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            ok_temp = (np.sum(stacked_A, axis=1) > 0) & (out_coeffs != 0)
-            stacked_Ax = stacked_A[ok_temp, :].T * 1
+            ok_temp = (np.sum(self.stacked_A, axis=1) > 0) & (out_coeffs != 0)
+            stacked_Ax = self.stacked_A[ok_temp, :].T * 1
             stacked_Ax *= self.MB.sivarf[self.MB.fit_mask][:, np.newaxis]
 
             try:
@@ -1360,7 +1337,7 @@ class MultiRegionFit:
             )
 
             # Ensure that the array is cleaned before repopulating
-            stacked_A[temp_offset:].fill(0.0)
+            self.stacked_A[self.temp_offset :].fill(0.0)
 
             # Largely unmodified from the original grizli code. Included within
             # this particular class method to avoid dealing with SharedMemory
@@ -1378,9 +1355,9 @@ class MultiRegionFit:
 
             forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            masked_modelf = np.dot(out_coeffs, stacked_A)
+            masked_modelf = np.dot(out_coeffs, self.stacked_A)
 
-            stacked_A[temp_offset:].fill(0.0)
+            self.stacked_A[self.temp_offset :].fill(0.0)
 
             print("Generating nebular lines...")
             self.template_sampler.gen_emline_spectra(emline=None)
@@ -1394,7 +1371,7 @@ class MultiRegionFit:
 
             forward_model_pool.starmap(fwd_model_fn, enumerate(self.regions_seg_ids))
 
-            masked_nebularf = np.dot(out_coeffs, stacked_A)
+            masked_nebularf = np.dot(out_coeffs, self.stacked_A)
 
             masked_contf = masked_modelf - masked_nebularf
 
@@ -1402,7 +1379,7 @@ class MultiRegionFit:
             del full_temp_arr
 
             # Reset the forward model array
-            stacked_A[temp_offset:].fill(0.0)
+            self.stacked_A[self.temp_offset :].fill(0.0)
 
             # Reconstruct the full flattened arrays without the fit mask
             full_modelf = np.zeros_like(self.MB.scif)
@@ -1484,58 +1461,11 @@ class MultiRegionFit:
                 overwrite=True,
             )
 
-        if save_lines:
-            # beam_models_len = 0
-            # for k_i, (k, v) in enumerate(beam_info.items()):
-            #     beam_models_len += np.prod(v["2d_shape"]) * len(v["list_idx"])
-
-            # if memmap:
-            #     flat_beam_models = np.memmap(
-            #         temp_dir / "memmap_beams_model.dat",
-            #         dtype=float_dtype,
-            #         mode="w+",
-            #         shape=(beam_models_len),
-            #     )
-            # else:
-
-            #     shm_beam_models = self.smm.SharedMemory(
-            #         size=np.dtype(float_dtype).itemsize * beam_models_len
-            #     )
-            #     flat_beam_models = np.ndarray(
-            #         (beam_models_len),
-            #         dtype=float_dtype,
-            #         buffer=shm_beam_models.buf,
-            #     )
-
+        def gen_line_maps(
+            self,
+        ):
             line_hdu = None
             saved_lines = []
-
-            # beams_fn = partial(
-            #     self._gen_beam_templates_from_pipes,
-            #     shared_seg_name=(
-            #         temp_dir / "memmap_oversamp_seg_maps.dat"
-            #         if memmap
-            #         else shm_seg_maps.name
-            #     ),
-            #     seg_maps_shape=oversamp_seg_maps_shape,
-            #     shared_models_name=(
-            #         temp_dir / "memmap_beams_model.dat"
-            #         if memmap
-            #         else shm_beam_models.name
-            #     ),
-            #     models_shape=flat_beam_models.shape,
-            #     posterior_dir=str(self.pipes_dir / "posterior" / self.run_name),
-            #     spec_wavs=spec_wavs,
-            #     beam_info=beam_info,
-            #     cont_only=False,
-            #     model_seeds=best_model_seeds,
-            #     coeffs=output_table[best_iter],
-            #     memmap=memmap,
-            #     n_shifted_model_seeds=n_shifted_samples,
-            #     return_line_flux=True,
-            # )
-
-            # lock = Lock()
 
             with multiprocessing.Pool(
                 processes=cpu_count,
@@ -1543,8 +1473,8 @@ class MultiRegionFit:
                 initargs=(
                     self.shm_model_spectra.name,
                     self.model_spectra_arr.shape,
-                    shm_stacked_A.name,
-                    stacked_A_shape,
+                    self.shm_stacked_A.name,
+                    self.stacked_A.shape,
                     self.MB,
                 ),
             ) as forward_model_pool:
@@ -1564,13 +1494,13 @@ class MultiRegionFit:
                 )
 
                 masked_modelf = np.dot(
-                    out_coeffs[temp_offset:], stacked_A[temp_offset:]
+                    out_coeffs[self.temp_offset :], self.stacked_A[self.temp_offset :]
                 )
 
                 full_modelf = np.zeros_like(self.MB.scif)
                 full_modelf[self.MB.fit_mask] = masked_modelf
 
-                stacked_A[temp_offset:].fill(0.0)
+                self.stacked_A[self.temp_offset :].fill(0.0)
 
                 for l_i, l_v in enumerate(use_lines):
 
@@ -1596,13 +1526,14 @@ class MultiRegionFit:
 
                     # Nebular without background fitting
                     masked_nebularf = np.dot(
-                        out_coeffs[temp_offset:], stacked_A[temp_offset:]
+                        out_coeffs[self.temp_offset :],
+                        self.stacked_A[self.temp_offset :],
                     )
 
                     # line_sn = np.nansum(
-                    #     stacked_A[temp_offset:] * out_coeffs[temp_offset:]
+                    #     stacked_A[self.temp_offset:] * out_coeffs[self.temp_offset:]
                     # ) / np.sqrt(
-                    #     np.nansum(( stacked_A[temp_offset:] * coeffs_errs[temp_offset:]) ** 2)
+                    #     np.nansum(( stacked_A[self.temp_offset:] * coeffs_errs[self.temp_offset:]) ** 2)
                     # )
 
                     masked_contf = masked_modelf - masked_nebularf
@@ -1611,7 +1542,7 @@ class MultiRegionFit:
                     # del full_temp_arr
 
                     # Reset the forward model array
-                    stacked_A[temp_offset:].fill(0.0)
+                    self.stacked_A[self.temp_offset :].fill(0.0)
 
                     # Reconstruct the full flattened arrays without the fit mask
                     full_nebularf = np.zeros_like(self.MB.scif)
@@ -1777,7 +1708,7 @@ class MultiRegionFit:
     def __exit__(self, exc_type, exc_value, traceback):
         self.__del__()
 
-    def initialise_shared_templates(self, n_spec_per_region: int):
+    def initialise_shared_memory(self, n_spec_per_region: int, memmap: bool = False):
 
         # Initialise the shared memory for the sampled spectra
         model_spectra_arr_shape = (
@@ -1796,6 +1727,33 @@ class MultiRegionFit:
 
         # Ensure the array is blank on first run
         self.model_spectra_arr.fill(0.0)
+
+        # This is the large array of models. Each row corresponds to a
+        # (probably) unique template, forward-modelled across all beams,
+        # and flattened.
+        stacked_A_shape = (
+            self.temp_offset + n_spec_per_region * self.n_regions,
+            self.MB.Nmask,
+        )
+
+        if memmap:
+            self.stacked_A = np.memmap(
+                self.temp_dir / "memmap_stacked_A.dat",
+                dtype=float_dtype,
+                mode="w+",
+                shape=stacked_A_shape,
+            )
+        else:
+            self.shm_stacked_A = self.smm.SharedMemory(
+                size=np.dtype(float_dtype).itemsize * np.prod(stacked_A_shape)
+            )
+            self.stacked_A = np.ndarray(
+                stacked_A_shape,
+                dtype=float_dtype,
+                buffer=self.shm_stacked_A.buf,
+            )
+
+        self.stacked_A.fill(0.0)
 
 
 def init_forward_model(
