@@ -31,8 +31,8 @@ from numpy.typing import ArrayLike
 from reproject import reproject_interp
 
 import niriss_tools
+from niriss_tools.grism.bagpipes_utils import BagpipesTemplateSampler
 from niriss_tools.grism.fitting_tools import CDNNLS, fennls, fnnls
-from niriss_tools.grism.samplers import BagpipesTemplateSampler
 from niriss_tools.grism.specgen import (
     CLOUDY_LINE_MAP,
     BagpipesSpecGenerator,
