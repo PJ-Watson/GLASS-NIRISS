@@ -1,7 +1,7 @@
 CDNNLS
 ======
 
-.. currentmodule:: niriss_tools.grism
+.. currentmodule:: niriss_tools.grism.fitting_tools
 
 .. autoclass:: CDNNLS
    :show-inheritance:

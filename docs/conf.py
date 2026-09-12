@@ -12,7 +12,7 @@ Configuration file for the Sphinx documentation builder.
 from sphinx_astropy.conf.v2 import *
 
 project = "niriss-tools"
-copyright = "2025, Peter J. Watson"
+copyright = "2026, Peter J. Watson"
 author = "Peter J. Watson"
 
 import sys

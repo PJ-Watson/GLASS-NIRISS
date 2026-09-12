@@ -17,6 +17,8 @@ from niriss_tools.grism import float_dtype
 from niriss_tools.grism.samplers import TemplateSampler
 from niriss_tools.grism.specgen import BagpipesSpecGenerator, air_to_vac
 
+__all__ = ["BagpipesTemplateSampler", "init_bagpipes_spec_gen"]
+
 
 def init_bagpipes_spec_gen(
     fit_instructions: dict, veldisp: float, spec_wavs: np.ndarray[float]

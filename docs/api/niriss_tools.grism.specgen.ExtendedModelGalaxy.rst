@@ -1,7 +1,7 @@
 ExtendedModelGalaxy
 ===================
 
-.. currentmodule:: niriss_tools.grism
+.. currentmodule:: niriss_tools.grism.specgen
 
 .. autoclass:: ExtendedModelGalaxy
    :show-inheritance:
@@ -10,10 +10,12 @@ ExtendedModelGalaxy
 
    .. autosummary::
 
-      ~ExtendedModelGalaxy.air_to_vac
+      ~ExtendedModelGalaxy.plot
+      ~ExtendedModelGalaxy.plot_full_spectrum
       ~ExtendedModelGalaxy.update
 
    .. rubric:: Methods Documentation
 
-   .. automethod:: air_to_vac
+   .. automethod:: plot
+   .. automethod:: plot_full_spectrum
    .. automethod:: update

@@ -24,7 +24,7 @@ def fennls(
     A: ArrayLike, x: ArrayLike, max_iterations: int = 1000, tolerance: float = 1e-6
 ) -> ArrayLike:
     """
-    A wrapper around `~fnnlsEigen.fnnls`.
+    A wrapper around `fnnlsEigen.fnnls`.
 
     Parameters
     ----------

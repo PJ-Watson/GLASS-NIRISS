@@ -365,7 +365,7 @@ def regen_catalogue(
         To run with segmentation masking (`1sep > 1.10``), also provide
         `aseg` and `aseg_id` arrays with `source_xy`, like
 
-            >>> source_xy = ra, dec, aseg, aseg_id
+        >>> source_xy = ra, dec, aseg, aseg_id
         .
 
     compute_auto_quantities : bool

@@ -20,6 +20,7 @@ from tqdm import tqdm
 __all__ = [
     "gen_stacked_beams",
     "align_direct_images",
+    "gen_psf",
     "log_with_offset",
     "LINE_UP",
     "LINE_CLEAR",
