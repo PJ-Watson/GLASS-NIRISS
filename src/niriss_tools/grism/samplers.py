@@ -1,7 +1,21 @@
 """Classes for sampling model seeds and spectral templates."""
 
 import multiprocessing
+import multiprocessing.pool
+from multiprocessing.managers import SharedMemoryManager
 from pathlib import Path
+from types import TracebackType
+from typing import Self
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
+
+from niriss_tools.grism import float_dtype
+
+__all__ = [
+    "TemplateSampler",
+    # "GrizliTemplateSampler",
+]
 
 
 class TemplateSampler:
@@ -10,17 +24,19 @@ class TemplateSampler:
 
     Parameters
     ----------
-    seed : int
+    n_regions : int
+        The number of regions for which templates will be generated.
+    seed : int, optional
         The base seed for all sampling.
     **kwargs : dict
         Any additional keyword parameters.
     """
 
-    def __init__(self, seed: int = 2744, **kwargs):
+    def __init__(self, n_regions: int, seed: int = 2744, **kwargs):
 
         self.seed = seed
 
-    def __enter__(self) -> TemplateSampler:
+    def __enter__(self) -> Self:
         return self
 
     def __del__(self) -> None:
@@ -61,11 +77,11 @@ class TemplateSampler:
         """
 
         self._process_pool = multiprocessing.Pool(
-            processes=self.cpu_count,
+            processes=cpu_count,
         )
 
     @property
-    def process_pool(self) -> multiprocessing.Pool():
+    def process_pool(self) -> multiprocessing.pool.Pool:
         """The pool of workers for all multiprocessing (`~multiprocessing.Pool`, read-only)."""
         return self._process_pool
 
@@ -78,7 +94,7 @@ class TemplateSampler:
 
     def gen_model_seeds_from_iter(
         self, iter_seed: int, n_samples: int, n_extra_regions: int = 0, **kwargs
-    ) -> tuple[np.ndarray[int], np.ndarray[int]]:
+    ) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
         """
         Construct a list of model seeds for a given iteration.
 
@@ -100,9 +116,9 @@ class TemplateSampler:
 
         Returns
         -------
-        model_seeds : np.ndarray[int]
-            The list of model seeds.
-        extra_region_idxs : np.ndarray[int]
+        model_seeds : np.NDArray[np.int_]
+            The 1D array of model seeds.
+        extra_region_idxs : np.NDArray[np.int_]
             The indices of the additional regions to sample.
         """
 

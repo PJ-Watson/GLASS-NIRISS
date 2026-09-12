@@ -462,19 +462,16 @@ class BagpipesTemplateSampler(TemplateSampler):
 
         vac_redshifted_wavs = air_to_vac(redshifted_wavs)
 
-        with multiprocessing.Pool(
-            processes=self.cpu_count,
-        ) as pool:
-            self.model_emline_spectra = np.array(
-                pool.starmap(
-                    interp_conserve_c,
-                    zip(
-                        repeat(self.spec_wavs),
-                        vac_redshifted_wavs,
-                        convolved_line_templates,
-                    ),
-                )
+        self.model_emline_spectra = np.array(
+            self.process_pool.starmap(
+                interp_conserve_c,
+                zip(
+                    repeat(self.spec_wavs),
+                    vac_redshifted_wavs,
+                    convolved_line_templates,
+                ),
             )
+        )
 
         self.model_emline_spectra /= (1 + model_redshifts)[:, np.newaxis]
 
@@ -652,7 +649,7 @@ class BagpipesTemplateSampler(TemplateSampler):
         """
 
         self._process_pool = multiprocessing.Pool(
-            processes=self.cpu_count,
+            processes=cpu_count,
             initializer=init_bagpipes_spec_gen,
             initargs=(self.fit_instructions, self.veldisp, self.spec_wavs),
         )
